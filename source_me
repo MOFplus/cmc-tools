@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Usage:
+#  $ source /path/to/source_me
+
+
+# Helper functions
+function __print()
+{
+   if [ "$SILENT" == "0" ]; then
+      echo $@
+   fi
+}
+
+function __usage()
+{
+   echo "Usage: source source_me"
+}
+
+# Settings
+SILENT=0
+
+# Process command line
+while [ "$1" != "" ]; do
+   case $1 in
+      --silent)
+         SILENT=1
+         ;;
+      -h | --help )
+         __usage
+         return 1
+         ;;
+      * )
+         __usage
+         return 1
+   esac
+   shift
+done
+
+#
+# Set paths
+#
+
+export PYLMPSPATH=`pwd`
+
+__print "Set PATH to pylmps:" 
+__print $PYLMPSPATH
+
+
+__print "Set PATH to molsys:" 
+export PYTHONPATH=/home/$USER/sandbox/molsys:$PYTHONPATH
+export PATH=/home/$USER/sandbox/molsys/scripts:$PATH
+
+__print "Set PYTHONPATH to lammps interface"
+export PYTHONPATH=/home/$USER/sandbox/lammps_newSept2020/python:$PYTHONPATH
+export REAXFF_FILES=/home/$USER/sandbox/lammps_newSept2020/potentials
+
+export PYTHONPATH=$PYLMPSPATH:$PYTHONPATH
+export PATH=$PYLMPSPATH/scripts:$PATH
+
+__print "Environment settings:"
+__print "----------------------"
+__print "PATH       :" $PATH
+__print "PYTHONPATH :" $PYTHONPATH
+__print "PYTHON     :" $(which python)
+__print "AGENT      :" $(whoami)
+__print "MACHINE    :" $(hostname)
+
+
