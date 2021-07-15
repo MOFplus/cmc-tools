@@ -1,0 +1,9 @@
+[submodule "molsys"]
+	path = molsys
+	url = https://github.com/MOFplus/molsys
+[submodule "pylmps"]
+	path = pylmps
+	url = https://github.com/MOFplus/pylmps
+[submodule "mofplus"]
+	path = mofplus
+	url = https://github.com/MOFplus/mofplus
