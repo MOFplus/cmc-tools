@@ -10,6 +10,10 @@ pool: pylmps
 
 steps:
 
+- checkout: self
+  submodules: true
+  persistCredentials: true
+
 - script: |
     source source_me 
     cd pylmps/tests/generic
