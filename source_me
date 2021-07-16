@@ -51,11 +51,11 @@ __print $PYLMPSPATH
 
 
 __print "Set PATH to molsys:" 
-export PYTHONPATH=/home/$USER/sandbox/molsys:$PYTHONPATH
-export PATH=/home/$USER/sandbox/molsys/scripts:$PATH
+export PYTHONPATH=$MOLSYSPATH:$PYTHONPATH
+export PATH=$MOLSYSPATH/scripts:$PATH
 
-__print "Set PYTHONPATH to lammps interface"
-export PYTHONPATH=/home/$USER/sandbox/lammps_newSept2020/python:$PYTHONPATH
+__print "Set PYTHONPATH to lammps interface" # Currently still that on the testing machine. This should be changed!
+export PYTHONPATH=/home/$USER/sandbox/lammps_newSept2020/python:$PYTHONPATH 
 export REAXFF_FILES=/home/$USER/sandbox/lammps_newSept2020/potentials
 
 export PYTHONPATH=$PYLMPSPATH:$PYTHONPATH
