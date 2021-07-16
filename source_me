@@ -41,7 +41,10 @@ done
 # Set paths
 #
 
-export PYLMPSPATH=`pwd`
+export PYLMPSPATH=`pwd`/pylmps
+export MOLSYSPATH=`pwd`/molsys
+export LAMMPSPATH=`pwd`/lammps
+export MOFPLUSPATH=`pwd`/mofplus
 
 __print "Set PATH to pylmps:" 
 __print $PYLMPSPATH
