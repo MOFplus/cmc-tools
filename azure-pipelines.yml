@@ -20,7 +20,7 @@ steps:
     cd build
     cmake ../cmake
     cmake -D BUILD_SHARED_LIBS=ON PKG_PYTHON=ON PKG_REPLICA=ON PKG_USER-COLVARS=ON PKG_CLASS2=ON PKG_KSPACE=ON PKG_MANYBODY=ON PKG_MC=ON PKG_USER-MOFFF=ON PKG_USER-H5MD=ON PKG_USER-MISC=ON PKG_MOLECULE=ON  PKG_USER-REAXC=ON ../cmake
-    cmake --parallel 4 --build . 
+    cmake --build . 
   displayName: 'build lammps'
 
 - script: |
