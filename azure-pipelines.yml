@@ -5,6 +5,7 @@
 
 trigger:
 - master
+- main
 
 pool: pylmps
 
