@@ -6,7 +6,8 @@
 	url = https://github.com/MOFplus/pylmps
 [submodule "mofplus"]
 	path = mofplus
-	url = https://github.com/MOFplus/mofplus
+	url = https://github.com/MOFplus/mofplus_rel
+	branch = release
 [submodule "lammps"]
 	path = lammps
 	url = https://github.com/MOFplus/lammps
