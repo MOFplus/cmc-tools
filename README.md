@@ -240,6 +240,7 @@ export PYTHONPATH=$CMCTOOLS/mofplus:$PYTHONPATH
 # script path for components
 export PATH=$CMCTOOLS/molsys/scripts:$PATH
 export PATH=$CMCTOOLS/pylmps/scripts:$PATH
+export PATH=$CMCTOOLS/mofplus/scripts:$PATH
 # path to ReaxFF paramter files (only if you want to use ReaxFF)
 export REAXFF_FILES=$CMCTOOLS/lammps/potentials
 ```
