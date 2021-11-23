@@ -15,6 +15,9 @@ steps:
   submodules: true
   persistCredentials: true
 
+- script: git submodule update --init
+  displayName: Checkout submodules
+
 - script: |
     cd lammps
     mkdir build
