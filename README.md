@@ -1,5 +1,7 @@
 # cmc-tools
 
+Version 2022.07.0 aka Grace Hopper 
+
 This is a tool collection for **C**omputational **M**aterials **C**hemistry and collects the various efforts of the CMC group at the Ruhr-University Bochum to perform
 mainly force field calculations using MOF-FF for MOFs and other systems.
 You can either use this repo with its submodules or get the four repos directly from github.com.
