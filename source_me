@@ -57,6 +57,7 @@ export PATH=$MOLSYSPATH/scripts:$PATH
 __print "Set PYTHONPATH to lammps interface" 
 export PYTHONPATH=$LAMMPSPATH/python:$PYTHONPATH 
 export REAXFF_FILES=$LAMMPSPATH/potentials
+export LD_LIBRARY_PATH=$LAMMPSPATH/build:$LD_LIBRARY_PATH
 
 export PYTHONPATH=$PYLMPSPATH:$PYTHONPATH
 export PATH=$PYLMPSPATH/scripts:$PATH
