@@ -10,7 +10,7 @@ This repository contains four interwoven modules:
 * molsys: another pure python library to handle molecular systems, base class for pylmps as well as other codes
 * pylmps: our python lammps wrapper, inspired by the older pydlpoly code
 * mofplus: a little addon to connect to the MOF+ website http://www.mpofplus.org, needed for paramter assignement and other tasks
-* weaver: a package for constructing MOFs according to the reverse topological approach, given as et of building blocks and a topology
+* weaver: a package for constructing MOFs according to the reverse topological approach, given a set of building blocks and a topology
 
 Additionally we maintane a custom fork of LAMMPS, which is needed in conjunction with pylmps and can be found [here](https://github.com/MOFplus/lammps)!
 
@@ -38,7 +38,11 @@ To install Micromamba you can simply run:
 ```bash
 "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
 ```
-and than follow the instructions on screen. For a more detailed guide please refer to the [official documentation](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html).
+If you do not have `curl` installed run:
+```bash
+sudo apt install curl
+```
+and then follow the instructions on screen. For a more detailed guide please refer to the [official documentation](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html).
 
 ## Creating the `molsys` environment
 The first step to create the environment is saving the following content in a `molsys.yml` file:
@@ -56,6 +60,10 @@ dependencies:
   - packmol
   - pip
   - pip:
+     - prompt_toolkit
+     - prettytable
+     - ruamel.yaml
+     - tqdm
      - h5py
      - pydal
      - cma
@@ -90,19 +98,19 @@ cd $CMC_INSTALL_DIR
 git clone https://github.com/MOFplus/cmc-tools
 ```
 ```bash
-git clone https://github.com/MOFplus/lammps.git
+git clone https://github.com/MOFplus/lammps
 ```
 Now we need to make the python modules available in your PYTHONPATH and the scripts in your PATH. For this purpose, please add the following lines to your `/home/$USER/.bashrc`:
 ```bash
 export CMCTOOLS=$CMC_INSTALL_DIR/cmc-tools
-export REAXFF_FILES=$CMCTOOLS/lammps/potentials
+export REAXFF_FILES=$CMC_INSTALL_DIR/lammps/potentials
 
 export PYTHONPATH=$CMCTOOLS/src:$PYTHONPATH
 export PYTHONPATH=$CMC_INSTALL_DIR/lammps/python:PYTHONPATH
 
 export PATH=$CMCTOOLS/scripts/molsys:$PATH
 export PATH=$CMCTOOLS/scripts/pylmps:$PATH
-export PATH=$CMCTOOLS/scripts/mofplus:$PATH
+export PATH=$CMCTOOLS/scripts/weaver:$PATH
 ```
 Afterwards, you should source your `.bashrc` via:
 ```bash
@@ -226,8 +234,22 @@ vmd -mfpx hkust1.mfpx
 
 # Quickstart
 Here are some examples on how the cmc-tools are used.
-## Assigning a force field
-
+## Assigning MOF-FF
+NOTE: the usage of the MOFPlus API currently only works with a molsys environement using python 3.8. This will be fixed soon!
+Starting from an ".xyz" file you can first convert it to an ".mfpx" file using the `x2x2` script:
+```bash
+x2x2 molecule.xyz molecule.mfpx
+```
+Assuming you have an account on [MOFPlus](https://www.mofplus.org/), you can then use the `fragmentize` script
+```bash
+fragmentize molecule.mfpx
+``` 
+-> atype, fragments
+After this you can run `assign_FF` to query parameters from the [MOFPlus](https://www.mofplus.org/) if they are available for your system.
+```bash
+assign_FF molecule.mfpx
+```
+this will prompt you with an interactive terminal window, guiding you through the process.
 ## molsys
 The molsys package acts as a storage container for molecular data and provides plenty of methods to manipulate them. Generally molsys is build upon the `mol` object which can be extended using the add-on system.
 Here a molsys object is initalized using our inhouse file formats: 
