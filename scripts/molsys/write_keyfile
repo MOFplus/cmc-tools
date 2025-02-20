@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Scipt to convert a parameter set given as (f)par, ric and mfpx to the 
+#  old fashioned keyfile format
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys
+
+
+name = sys.argv[1]
+
+m = molsys.mol.from_file(name+'.mfpx')
+m.addon('ff')
+## try par and fpar file
+try:
+    m.ff.read(name)
+except:
+    m.ff.read(name,fit=True)
+
+m.ff.write_key(name+'.key')
+

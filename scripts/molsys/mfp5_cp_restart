@@ -1,0 +1,31 @@
+#! /usr/bin/env python
+
+import sys
+from h5py import File
+
+srcf = sys.argv[1]
+src_stage = sys.argv[2]
+trgf = sys.argv[3]
+
+# TODO assert file does not exist
+
+srcf = File(srcf, "r")
+trgf = File(trgf, "w")
+
+# copy the root file attributes
+for k in srcf.attrs:
+    trgf.attrs[k] = srcf.attrs[k]
+
+# copy the system Group
+ssystem = srcf["system"]
+srcf.copy(ssystem, trgf, "system")
+
+# copy the restart group of the stage
+sstage = srcf[src_stage]
+tstage = trgf.create_group(src_stage)
+srcf.copy(sstage["restart"], tstage, "restart")
+
+
+srcf.close()
+trgf.close()
+

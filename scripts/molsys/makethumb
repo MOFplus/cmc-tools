@@ -1,0 +1,14 @@
+#! /usr/bin/env python3
+
+import sys
+import molsys
+from molsys.util.thumbnail import thumbnail
+
+name = sys.argv[1]
+
+m = molsys.mol.from_file(name)
+thumbnail(m)
+
+
+
+

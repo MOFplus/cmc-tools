@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+
+# molsys import(s)
+import molsys
+from molsys.util.uff import UFFAssign
+
+#####################################################################################################
+#  Main program
+#####################################################################################################
+
+
+#
+# 1. Read in coordinates
+#
+fcoord = sys.argv[1]
+fcoord_type = fcoord.split('.')[-1]
+
+m = molsys.mol()
+m.read(fcoord, ftype = fcoord_type)
+if fcoord_type == 'xyz':
+    thresh = 0.1
+    m.detect_conn(remove_duplicates = False, thresh=thresh)
+    m.set_nofrags()
+
+elif fcoord_type == 'mfpx':
+    m = molsys.mol.from_file(fcoord)
+
+else:
+    print("Not supported format for coordinates")
+    sys.exit()
+
+#
+# 2. Setup utilities (graph and ff gen) 
+#
+uff = UFFAssign(m)
+uff.assign()
+ 

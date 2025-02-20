@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+# Script to convert the (f)par file into the yml format.
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys.mol as mol
+
+
+fi = sys.argv[1]
+fi_type = fi.split('.')[-1]
+
+if len(sys.argv) > 2:
+    fit = bool(sys.argv[2])
+else:
+    fit = True
+
+m = mol.from_file(fi)
+m.addon("ff")
+m.ff.read(fi.split(".")[0], fit=fit)
+m.ff.write(fi.split(".")[0], yaml=True)

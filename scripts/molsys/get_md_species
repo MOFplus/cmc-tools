@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+       get_md_species
+
+"""
+import pylmps
+import molsys
+import sys
+import os
+import numpy as np
+from molsys.util import RDB
+
+#
+# class defintions 
+#
+class base_calculator:
+
+    def __init__(self, mol, params : dict):
+        self.name = "base"
+        self.mol = mol
+        self.natoms = mol.get_natoms()
+        self.energy = 0.0
+        self.force  = np.zeros([self.natoms, 3], dtype="float64")  
+        return
+
+    def calc_energy(self):
+        print("You called the base class")
+        return self.energy
+
+    def calc_energy_force(self):
+        print("You called the base class")
+        return self.energy, self.force
+
+    def optimize(self,tconv=0.01,TS=False,rbonds=[]):
+        final_energy = 0.0
+        print("You called the base class")
+        return final_energy
+
+    def get_mol(self):
+        print("You called the base class")
+        return self.mol
+
+    def end(self):
+        print("You called the base class")
+        return
+
+class reaxff_calculator(base_calculator):
+
+    def __init__(self, mol, params : dict):
+        super(base_calculator, self).__init__()
+        self.pl = pylmps.pylmps("opt")
+        self.pl.setup(mol = mol, local=True, ff="ReaxFF")
+        return
+
+    def calc_energy(self):
+        return self.pl.calc_energy()
+
+    def optimize(self,tconv=0.01,TS=False,rbonds=[]):
+        ### default ####
+        forceconst = 1000.0
+        if TS:
+            for i in range(rbonds.shape[0]):
+                par = (forceconst, bondlength[i])
+                self.pl.add_restraint("bnd", tuple(rbonds[i]), par)
+        final_energy = self.pl.MIN(tconv)
+        if TS:
+            self.pl.clear_restraints()
+        self.pl.update_mol()
+        return final_energy
+
+
+    def get_mol(self):
+        return self.pl.mol
+
+    def end(self):
+        self.pl.end()
+        return
+
+
+if len(sys.argv) < 3:
+    print ("usage:  get_md_species <db_path> <mfp5_file> <stage> <frame>")
+    exit()
+
+#
+# Read command line arguments
+#
+db_path   = sys.argv[1]
+mfp5_path = sys.argv[2]
+mfp5_path = os.path.abspath(mfp5_path)
+stage     = sys.argv[3]
+frame     = int(sys.argv[4])
+
+print ("open database %s" % db_path)
+rdb = RDB.RDB(db_path)
+print ("dealing with MD from file %s and stage %s"  % (mfp5_path, stage))
+
+db = rdb.db
+md = db((db.md.path == mfp5_path) & (db.md.stage == stage)).select().first()
+
+revents = db((db.revent.mdID == md) & \
+             (db.revent.frame == frame)).select(orderby=db.revent.frame)
+
+
+home = os.getcwd()
+params = { "calculator" : "reaxff" 
+         , "lot"        : "ReaxFF"
+         }
+
+# now loop over revents
+for (i, cur_revent) in enumerate(revents):
+
+
+
+    mds = db((db.md_species.reventID == cur_revent) & (db.md_species.react_compl == False)  ).select()
+
+    rdir = home + "/reaction_at_frame_" + str(cur_revent.frame)
+    os.mkdir(rdir)
+    os.chdir(rdir)
+
+    ied = 0
+    ipr = 0
+    its = 0
+    for m in mds:
+        rbonds = []
+
+        fname, mfpxf = db.md_species.mfpx.retrieve(m.mfpx)
+        mfpxs = mfpxf.read().decode('utf-8')
+        mfpxf.close()
+        mol = molsys.mol.from_string(mfpxs)
+
+        calculator = reaxff_calculator(mol,params)
+        TS = (m.foffset == 0)
+        if TS:
+           # get revent for this mdspecies
+           rbonds = ospec["rbonds"]
+           rbonds = np.array(rbonds)
+           nrbonds = len(rbonds)//2
+           rbonds.shape = (nrbonds, 2)
+           # all molecules are non-perioidc  .. just compute current bond distance
+           bondlength = []
+           for i in range(nrbonds):
+               r = mol.xyz[rbonds[i,0]]-mol.xyz[rbonds[i,1]]
+               bondlength.append(np.sqrt((r*r).sum()))
+        final_energy = calculator.optimize(0.01,TS,rbonds)
+        opt_mol = calculator.get_mol()
+
+        if m.foffset == -1:
+            mol.write("educt_" + str(ied) + ".xyz","xyz")
+            mol.write("educt_" + str(ied) + ".mfpx","mfpx")
+            opt_mol.write("educt_opt_" + str(ied) + ".xyz","xyz")
+            opt_mol.write("educt_opt_" + str(ied) + ".mfpx","mfpx")
+            ied += 1
+        if m.foffset == 0:
+            mol.write("ts_" + str(its) + ".xyz","xyz")
+            mol.write("ts_" + str(its) + ".mfpx","mfpx")
+            opt_mol.write("ts_opt_" + str(its) + ".xyz","xyz")
+            opt_mol.write("ts_opt_" + str(its) + ".mfpx","mfpx")
+            its += 1
+        if m.foffset == 1:
+            mol.write("product_" + str(ipr) + ".xyz","xyz")
+            mol.write("product_" + str(ipr) + ".mfpx","mfpx")
+            opt_mol.write("product_opt_" + str(ipr) + ".xyz","xyz")
+            opt_mol.write("product_opt_" + str(ipr) + ".mfpx","mfpx")
+            ipr += 1
+
+    os.chdir(home)

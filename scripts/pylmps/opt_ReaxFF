@@ -1,0 +1,28 @@
+#!/usr/bin/env python3 
+
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#   Script to opimize with ReaxFF
+############################################################################
+
+import sys
+import pylmps
+import molsys
+
+fname = sys.argv[1]
+name = fname.rsplit('.',1)[0]
+
+m = molsys.mol.from_file(fname)
+
+pl = pylmps.pylmps(name)
+pl.setup(local=True, mol=m, ff="ReaxFF", origin="center", bcond=0)
+
+pl.MIN(0.01)
+
+pl.write(name+'_opt.xyz')
+
+
+
+

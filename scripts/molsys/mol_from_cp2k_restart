@@ -1,0 +1,46 @@
+#!/usr/bin/env python3 -i
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to convert cp2k restart file to mfpx, discarding anything but xyz and cell
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys
+import numpy
+from molsys.util.units import *
+
+print('USAGE: : mol_from_cp2k_restart  [restartfile]  [name or mfpx]')
+print('if [name] is given , it will write [name].mfpx after bond detection')
+print('if [mfpx] is given , mfpxname_fromrest.mfpx utilizing the bonds provided in the mfpx file')
+
+infile = sys.argv[1]
+name = sys.argv[2]
+
+if name.rsplit('.',1)[-1] == 'mfpx':
+    mref = molsys.mol.from_file()
+    name = name.rsplit('')
+txt = open(infile,'r').read()
+
+cell = numpy.array([[float(x) for x in line.split()[1:]] for line in txt.split('&CELL')[-1].rsplit('&END CELL')[0].split('\n')[1:4]])
+print(cell)
+xyztxt = txt.split('&COORD')[-1].rsplit('&END COORD')[0]
+xyz,elems = [],[]
+
+for xx in xyztxt.split('\n')[1:-1]:
+    s = xx.split()
+    elems.append(s[0])
+    xyz.append([float(x) for x in s[1:]])
+m = molsys.mol.from_array(numpy.array(xyz))
+m.elems = elems
+m.set_cell(cell)
+m.detect_conn()
+
+m.write(name+'.mfpx')
+
+
+

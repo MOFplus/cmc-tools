@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to convert different structure file formats based on molsys
+#
+#########################################################################
+
+
+import molsys.stow as stow
+import string
+import unit_cell
+import molsys.mol as mol
+
+option = [
+        ['', 'i', 'ifile', "Name of file read in (if no -s is given, the file extension is used as a type)"],
+        ['', 'o', 'ofile', "Name of file written out (if no -t is given, the file extension is used as the type)"],
+        ['', 's', 'itype', "Type of the file read in"],
+        ['', 't', 'otype', "Type of the file written out"],
+        ['', 'c', 'cell',  "Cell paramter"],
+        ['', 'a', 'writeas', "write out as  topo"]]
+
+shellval = stow.main(stow.sys.argv[1:], option)
+
+fi = shellval[0]
+fo = shellval[1]
+fti = shellval[2]
+if fti =='':fti=string.split(fi,'.')[-1]
+fto = shellval[3]
+if fto =='':fto=string.split(fo,'.')[-1]
+cell = shellval[4]
+writeas = shellval[5]
+assert writeas in ["", "bb", "topo"], "Unknown write option %s" % writeas
+
+
+m = mol()
+m.read(fi, ftype = fti)
+if cell:
+    cellparams = [float(i) for i in cell.split()]
+    m.set_cellparams(cellparams)
+if fti == 'xyz':
+    m.detect_conn(remove_duplicates = True)
+    m.set_nofrags()
+if writeas == "topo":
+    m.write(fo, ftype = fto, topo=True)
+else:
+    m.write(fo, ftype = fto)

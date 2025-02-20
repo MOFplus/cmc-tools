@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+""" script to find all unique reactions in the DB
+
+"""
+
+import molsys
+import sys
+import os
+import numpy as np
+from molsys.util import RDB
+from molsys.util import print_progress
+
+import uuid
+import copy
+
+####################################################################################
+# Helper functions
+####################################################################################
+
+def add_compare_data(comparer, mdspec):
+    """
+
+    Adds data for comparison of species
+
+    Args:
+        - comparer : data container for comparison
+        - mdspec   : a md_species database row
+    """
+
+    for m in mdspec.sort(lambda row: row.sumform):
+    
+        # get mol object from DB
+        fname, mfpxf = db.md_species.mfpx.retrieve(m.mfpx)
+        mfpxs = mfpxf.read().decode('utf-8')
+        mfpxf.close()
+        mol = molsys.mol.from_string(mfpxs)
+    
+        sumform = mol.get_sumformula()
+    
+        mol.addon("graph")
+        mol.graph.make_graph()
+        molgfull = copy.deepcopy(mol.graph.molg)
+        mol.graph.make_comp_graph()
+        molg = mol.graph.molg
+
+        if (m.foffset ==  0 ):
+            comparer["molgraph:ts"].append(molg)
+            comparer["molgraph_full:ts"].append(molgfull)
+            comparer["sumform:ts"].append(sumform)
+        if (m.foffset == -1 ):
+            comparer["molgraph:ed"].append(molg)
+            comparer["molgraph_full:ed"].append(molgfull)
+            comparer["sumform:ed"].append(sumform)
+        if (m.foffset ==  1 ):
+            comparer["molgraph:pr"].append(molg)
+            comparer["molgraph_full:pr"].append(molgfull)
+            comparer["sumform:pr"].append(sumform) 
+
+    return
+
+def compare_species(species,sumforms,moldata):
+    """
+
+    Compare species in unique reaction list with mol object
+
+    Args:
+        - species  : list of the species 
+        - sumforms : list of thim sum formula of th species 
+        - moldata  : list of (mol object, mdspecies) to compare
+    """
+
+    check = False
+    is_first = True
+
+    mols = [m[0] for m in moldata]
+
+    for sp,sp_sumform,mol in zip(species,sumforms,mols):
+    
+        is_same = (  sp_sumform == mol.get_sumformula() ) 
+    
+        if not is_same:
+            check = False
+            break 
+ 
+        is_equal, error_code = molsys.addon.graph.is_equal(mol.graph.molg, sp, use_fast_check=False)
+
+        if is_first:
+            check = is_equal
+            is_first = False
+        else:
+            check = is_equal and check
+
+        if not check:
+            break
+
+        if error_code != 0:
+            myid = uuid.uuid4()
+
+            mol.graph.plot_graph(str(myid) + "_plot1.pdf")
+
+    return check
+
+####################################################################################
+#  Start of the main script
+####################################################################################
+
+
+
+if len(sys.argv) < 5:
+    print ("usage:  find_unique_reactions <db_path> <mfp5_file> <stage> <add redundant species?(y/n)>")
+    exit()
+    
+#
+# Read command line arguments
+#
+db_path   = sys.argv[1]
+mfp5_path = sys.argv[2]
+mfp5_path = os.path.abspath(mfp5_path)
+stage     = sys.argv[3]
+try:
+    check_if_included = True
+    if sys.argv[4].lower() in ['y','yes','t','true','1']:
+        check_if_included = False
+except:
+    check_if_included = True
+
+
+print ("open database %s" % db_path)
+rdb = RDB.RDB(db_path)
+print ("dealing with MD from file %s and stage %s"  % (mfp5_path, stage))
+
+db = rdb.db
+md = db((db.md.path == mfp5_path) & (db.md.stage == stage)).select().first()
+#rdb.set_md_run(mfp5_path,stage)
+#md = db((db.md.stage == stage)).select().first()
+revents = db((db.revent.mdID == md)).select()
+num_all = (len(revents))
+
+# init counter
+num_unique = 0
+
+
+#
+# Read in all unique reactions
+#
+unique_reactions = []
+unique_cmp_data  = {}
+num_unique_change = 0
+for r in revents:
+    if r["reactionsID"] is not None:
+        unique_reactions.append(r)
+        is_first = not r["reactionsID"] in unique_cmp_data
+        if is_first:
+            unique_cmp_data[r["reactionsID"]] = { "molgraph:ts"      : []
+                                                , "molgraph_full:ts" : []
+                                                , "sumform:ts"       : []
+                                                , "molgraph:ed"      : []
+                                                , "molgraph_full:ed" : []
+                                                , "sumform:ed"       : []
+                                                , "molgraph:pr"      : []
+                                                , "molgraph_full:pr" : []
+                                                , "sumform:pr"       : []
+                                                }
+
+            mdspec = db((db.md_species.reventID == r) & (db.md_species.react_compl == False)  ).select()
+
+            add_compare_data(unique_cmp_data[r["reactionsID"]], mdspec)
+
+            reaction = db(db.reactions.id == r["reactionsID"]).select().first()
+            if reaction["change"]:
+                num_unique_change += 1
+
+
+num_unique = len(unique_cmp_data)
+
+#
+# Main loop to sort out non-unique reactions
+#
+count = 0
+bad_reactions = []
+for r in revents:
+
+    cur_r = r
+    count += 1
+
+    print_progress.print_progress(count, num_all)
+
+    # Check if revent has alredy record field unique_revent and skip in this case 
+    if cur_r["reactionsID"] is not None:
+        continue
+    
+
+    is_unique     = True
+    is_reversed   = False
+    same_reaction = False
+    back_reaction = False
+
+    ed_mol = [] 
+    pr_mol = [] 
+    ts_mol = [] 
+
+    # get all md_species for this event
+    mdspec = db((db.md_species.reventID == cur_r) & (db.md_species.react_compl == False) ).select()
+    if len(mdspec) > 0:
+
+        ##
+        # extract ts, ed and pr for this reaction  
+        ## 
+
+        # Note: We have to sort the mdspecies to always match the same species in order
+        #       to match them in the comparison
+        for m in mdspec.sort(lambda row: row.sumform):
+
+            # get mol object from DB
+            fname, mfpxf = db.md_species.mfpx.retrieve(m.mfpx)
+            mfpxs = mfpxf.read().decode('utf-8')
+            mfpxf.close()
+            mol = molsys.mol.from_string(mfpxs)
+
+            have_ts = (m.foffset == 0 )
+            have_ed = (m.foffset == -1)
+            have_pr = (m.foffset == 1 )
+          
+            mol.addon("graph")
+            mol.graph.make_comp_graph()
+
+            if have_ts:
+                ts_mol.append((mol,m))
+             
+            if have_ed:
+                ed_mol.append((mol,m))
+
+            if have_pr:
+                pr_mol.append((mol,m))
+
+
+        ##
+        # analyze species to avoid artificats from ReaxFF
+        ##
+        new_revent = False
+        remove_aids = set([])
+        for ed,m in ed_mol:
+            elems = ed.get_elems()
+            slist = elems
+            nelems = len(elems)
+            if nelems <= 3:
+                continue
+            slist = list(filter(("o").__ne__, slist)) 
+            slist = list(filter(("h").__ne__, slist)) 
+            if len(slist) == 0:
+                # we probably have a H-O-H-O- chain
+                aids = set(m.atomids)
+                # add to remove list 
+                remove_aids = remove_aids.union(aids)
+                new_revent = True
+
+        #
+        # remove aids which are artifacts from ReaxFF       
+        #
+        if new_revent:
+            print("Strange molcular species detected in revent %d" % (r.id)) 
+
+        ##
+        # compare with elements in unique_reaction list
+        ##
+        for ur in reversed(unique_reactions):
+
+            urid = ur["reactionsID"] 
+
+            compare_data = unique_cmp_data[urid]
+
+            same_ts    = compare_species(compare_data["molgraph:ts"],compare_data["sumform:ts"],ts_mol)
+            same_ed    = compare_species(compare_data["molgraph:ed"],compare_data["sumform:ed"],ed_mol)
+            same_ed_pr = compare_species(compare_data["molgraph:pr"],compare_data["sumform:pr"],ed_mol)
+            same_pr    = compare_species(compare_data["molgraph:pr"],compare_data["sumform:pr"],pr_mol)
+            same_pr_ed = compare_species(compare_data["molgraph:ed"],compare_data["sumform:ed"],pr_mol)
+
+            same_reaction = (same_ts and same_pr and same_ed) 
+            back_reaction = (same_ts and same_pr_ed and same_ed_pr)
+
+            if same_reaction or back_reaction:
+                break
+
+    is_unique = not (same_reaction or back_reaction)
+
+    is_reversed = back_reaction
+
+    if is_unique:
+        unique_reactions.append(cur_r)
+        num_unique += 1
+
+        # create comparison data structure 
+        cmp_data = { "molgraph:ts"      : []
+                   , "molgraph_full:ts" : []
+                   , "sumform:ts"       : []
+                   , "molgraph:ed"      : []
+                   , "molgraph_full:ed" : []
+                   , "sumform:ed"       : []
+                   , "molgraph:pr"      : []
+                   , "molgraph_full:pr" : []
+                   , "sumform:pr"       : []
+                   }
+
+        mdspec = db((db.md_species.reventID == cur_r) & (db.md_species.react_compl == False)  ).select()
+
+        add_compare_data(cmp_data, mdspec)
+        #
+        # Check if molecular C graph changed
+        #
+        change_in_molgraph = False 
+        for ed, pr in zip(cmp_data["molgraph:ed"], cmp_data["molgraph:pr"] ):
+            is_equal, error_code = molsys.addon.graph.is_equal(ed, pr)
+
+            if not is_equal:
+                change_in_molgraph = True
+                num_unique_change += 1
+                break
+        #
+        # in rare cases it can happen that the findR wrongly assigned a reaction. We catch this below
+        change_in_full_molgraph = change_in_molgraph
+        if not change_in_full_molgraph:
+            for ed, pr in zip(cmp_data["molgraph_full:ed"], cmp_data["molgraph_full:pr"] ):
+                is_equal, error_code = molsys.addon.graph.is_equal(ed, pr)
+
+                if not is_equal:
+                   change_in_full_molgraph = True
+                   break
+        # 
+        # GS: Currently deactivated 
+        change_in_full_molgraph = True
+        #
+        # Add unique reaction entry to database. 
+        #
+        if change_in_full_molgraph:
+            reactID = rdb.register_reaction(
+                cur_r["uni"],
+                change_in_molgraph,
+                "fromMD"
+            )
+            #
+            # Update comparison data
+            #
+            unique_cmp_data[reactID] = cmp_data 
+            #
+            # let species ref to reaction
+            #
+            rbonds = []
+            for ed,m in ed_mol:
+               specid, is_new = rdb.add_species(ed,check_if_included)
+               rdb.add_reac2spec(reactID,specid,-1)
+               if is_new:
+                  rdb.add_opt_species(mol=ed,lot="fromMD",energy=0.0,specID=specid,path="",rbonds=rbonds)
+                  m.update_record(speciesID=specid)
+            for pr,m in pr_mol:
+               specid, is_new = rdb.add_species(pr,check_if_included)
+               rdb.add_reac2spec(reactID,specid, 1) 
+               if is_new:
+                  rdb.add_opt_species(mol=pr,lot="fromMD",energy=0.0,specID=specid,path="",rbonds=rbonds)
+                  m.update_record(speciesID=specid)
+            for ts,m in ts_mol:
+               specid, is_new = rdb.add_species(ts,False) # For the moment the transisiton state is always unique
+               rbonds = r["rbonds"]  
+               rdb.add_reac2spec(reactID,specid, 0) 
+               if is_new:
+                  rdb.add_opt_species(mol=ts,lot="fromMD",energy=0.0,specID=specid,path="",rbonds=rbonds)
+                  m.update_record(speciesID=specid)
+            # Update reaction event
+            cur_r.update_record(reactionsID=reactID)
+            cur_r.update_record(reversed=is_reversed)
+            if new_revent:
+               bad_reactions.append(reactID)
+        else:
+            del unique_reactions[-1]
+            num_unique -= 1
+    else:
+        # update reaction event
+        cur_r.update_record(reactionsID=ur["reactionsID"])
+        cur_r.update_record(reversed=is_reversed)
+
+
+num_non_unique = num_all - num_unique
+db.commit()
+
+print("Num unique :     %d " % (num_unique)) 
+print("Num unique (C):  %d " % (num_unique_change))
+print("Num non unique : %d " % (num_non_unique)) 
+
+if len(bad_reactions) > 0:
+  print("Consider to ignore reaction:")
+  print("----------------------------")
+  for rid in bad_reactions:
+      print(rid)

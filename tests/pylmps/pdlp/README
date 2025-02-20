@@ -1,0 +1,7 @@
+For weird reasons the traj test fails for pytest (try with pytest -s)
+
+you need to run them one by one:
+pytest -s test_pdlp_ff.py
+pytest -s test_pdlp_traj_rest.py
+
+

@@ -1,0 +1,27 @@
+#! /usr/bin/env python3
+
+
+import molsys
+import sys
+from molsys.util.uff import UFFAssign
+
+fname = sys.argv[1]
+froot = fname.rsplit('.',1)[0]
+fext  = fname.rsplit('.',1)[1]
+if fext == "xyz":
+    detect_conn = True
+else:
+    detect_conn = False
+
+uff = "UFF"
+
+m = molsys.mol.from_file(fname)
+ua = UFFAssign(m, uff=uff, detect_conn=detect_conn)
+ua.assign()
+
+m.ff.write(froot)
+
+
+
+
+

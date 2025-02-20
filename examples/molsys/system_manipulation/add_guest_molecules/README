@@ -1,0 +1,15 @@
+Here we use the molecules addon to add 20 benzene molecules to a HKUST1 MOF.
+
+Note that the added molecule must be non-perioic and exactly one chemical molecule
+
+Both MOF and guest have assigned forcefields. In this case also the FFs are merged.
+
+When packmol is installed and in the path (to be called on the shell with packmol < input) 
+then it is used to position the guest molecules
+
+Note: we use the pydlpoly convention with the origin of the system in the center of the unit cell.
+In other words fractional coords go from -0.5 to +0.5
+
+RS
+
+

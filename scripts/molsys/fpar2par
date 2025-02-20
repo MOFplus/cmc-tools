@@ -1,0 +1,28 @@
+#!/usr/bin/env python3 -i
+
+import molsys
+import os
+import sys
+import numpy
+
+
+print('give the name of the fpar file to convert (without the ".fpar")')
+try:
+    name = sys.argv[1]
+except:
+    raise IOError('give a name!')
+m = molsys.mol()
+m.addon("ff")
+m.ff.do_not_varnames2par=True
+m.read(name +".mfpx")
+m.ff.read(name,fit=True)
+
+os.system('cp %s.fpar %s.fpar.bak' % (name,name))
+os.system('cp %s.ric %s.ric.bak' % (name,name))
+
+#m.ff.varnames2par()
+m.ff.fit=False
+m.ff.write(name,fpar=False)
+
+
+

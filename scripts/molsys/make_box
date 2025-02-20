@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to translate the coordinates of an atomistic system        
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys.mol as mol
+import numpy
+
+print('USAGE: provide mfpx nx ny nz dx dy dz')
+# TBI: print '-rel results in the use of fractional displacements'
+name = sys.argv [1].rsplit('.',1)[0]
+fi = sys.argv[1]
+fi_type = fi.split('.')[-1]
+fo = name+'_box.mfpx' #.split('.')[0]+'_'+sys.argv[2]+'.mfpx'
+fo_type = fi_type
+
+if len(sys.argv) <=2 : print('please provide a translation')
+
+nx = int(sys.argv[2])
+ny = int(sys.argv[3])
+nz = int(sys.argv[4])
+dx = float(sys.argv[5])
+dy = float(sys.argv[6])
+dz = float(sys.argv[7])
+
+dxyz = numpy.array([dx,dy,dz])
+mx = mol()
+
+m = mol()
+m.read(fi, ftype = fi_type)
+d = numpy.min(m.xyz,axis=0)-0.5*dxyz
+m.translate(-d) # move s.t. origin is at 0,0,0
+
+for ix in range(nx):
+    for iy in range(ny):
+        for iz in range(nz):
+            mx.add_mol(m,translate=[ix*dx,iy*dy,iz*dz])
+
+mx.periodic=True
+mx.set_cellparams([nx*dx,ny*dy,nz*dz,90.0,90.0,90.0],cell_only=True)
+#m.wrap_in_box()
+mx.write(fo, ftype = fo_type)

@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+import molsys
+import sys
+import os
+
+try:
+    addon = sys.argv[3]
+except IndexError:
+    addon = None
+
+try:
+    strcell = sys.argv[2]
+    scell = [int(s) for s in strcell.split(',')]
+except IndexError:
+    strcell = '1,1,1'
+    scell = [1,1,1]
+
+try:
+    fname = sys.argv[1]
+    m = molsys.mol.from_file(fname)
+    print(("%s loaded as mol instance \"m\"" % fname))
+    if sum(scell) > 3:
+        if addon == "colorize":
+            m.make_supercell(scell, colorize=True)
+        else:
+            m.make_supercell(scell)
+        print(("\"m\" made as %s supercell" % strcell))
+    if addon is not None and addon != "colorize":
+        m.addon(addon)
+        print(("\"m.%s\" addon loaded" % addon))
+    m.view(pbc=False)
+except IndexError:
+    print("molsys, sys, and os imported (no mol instance initialized)")
+

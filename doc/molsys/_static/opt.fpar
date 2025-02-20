@@ -1,0 +1,102 @@
+FF BABAK-FF
+
+# Supported bnd potentials mm3, quartic, morse
+# mm3:     E(r) = 1/2 k(r-r0)^2*[1-2.55(r-r0)+7/12(2.55(r-r0))^2]
+#          r0 in A, k in mdyn/A
+#          mm3 k r0
+# morse:   E(r) = (1/2a^2)*k*[1-e^(-a(r-r0))] with Ed = k/2a^2
+#          r0 in A, k in mdyn/A, Ed in kcal/mol
+#          morse k r Ed
+# quartic: E(r) = 1/2 k(r-r0)^2*[1-k2(r-r0)+k3(k2(r-r0))^2]
+#          r0 in A, k in mdyn/A, k2 in A^-1 and k3 is unitlesl
+#          quartic k r0 k2 k3
+bnd_type 4
+1                      mm3      6.82745519      1.39497966           # mm3->(c3_c2h1@ph,c3_c2h1@ph)|benzene
+2                      mm3           $b2_0           $b2_1           # mm3->(c3_c3@ph,c3_c3@ph)|ph-ph
+3                      mm3      5.42839843      1.09386912           # mm3->(c3_c2h1@ph,h1_c1@ph)|benzene
+4                      mm3           $b1_0           $b1_1           # mm3->(c3_c2h1@ph,c3_c3@ph)|ph-ph
+
+# Supported ang potentials mm3, fourier, quartic, strbnd
+# mm3:     E(a) = 1/2 k(a-a0)^2*[1-0.014(a-a0)+5.6e-5(a-a0)^2-7e-7(a-a0)^3+2.2e-8(a-a0)^4]
+#          a0 in deg, k in mdyn/(A*rad)
+#          mm3 k a0
+# fourier: E(r) = V/a[1+cos(n*a+a0)]
+#          a0 in deg, V in kcal/mol, n is unitless
+#          fourier V a0 n 1.0 1.0
+# quartic: E(a) = 1/2 k(a-a0)^2*[1-k2(a-a0)+k3(k2(a-a0))^2]
+#          a0 in deg, k in mdyn/(A*rad), k2 in 1/rad, and k3 is unitless
+#          quartic k a0 k2 k3
+# strbnd:  E(r1,r2,a) = kss(r1-r10)(r2-r20)+(a-a0)*[ksb1*(r1-r10)+ksb2(r2-r20)]
+#          r10, r20 in A, a in deg, kss in mdyn/A, ksb1 and ksb2 in mdyn/(rad*A)
+#          strbnd ksb1 ksb2 kss r10 r20 a0
+ang_type 6
+1                      mm3      1.07162634    119.63797853           # mm3->(c3_c2h1@ph,c3_c2h1@ph,c3_c2h1@ph)|benzene
+2                      mm3           $a4_0           $a4_1           # mm3->(c3_c3@ph,c3_c2h1@ph,h1_c1@ph)|ph-ph
+3                      mm3      0.64910875    114.68476060           # mm3->(c3_c2h1@ph,c3_c2h1@ph,h1_c1@ph)|benzene
+4                      mm3           $a2_0           $a2_1           # mm3->(c3_c2h1@ph,c3_c3@ph,c3_c3@ph)|ph-ph
+5                      mm3           $a3_0           $a3_1           # mm3->(c3_c2h1@ph,c3_c2h1@ph,c3_c3@ph)|ph-ph
+6                      mm3           $a1_0           $a1_1           # mm3->(c3_c2h1@ph,c3_c3@ph,c3_c2h1@ph)|ph-ph
+
+# Supported dih potentials cos3, cos4
+# cos3:    E(d) = Va/2[1+cos(d)]+Vb/2[1-cos(d)]+Vc/2[1+cos(d)]
+#          Va, Vb and Vc in kcal/mol
+#          cos3 Va Vb Vc
+# cos4:    E(d) = Va/2[1+cos(d)]+Vb/2[1-cos(d)]+Vc/2[1+cos(d)]+Vd/2[1-cos(d)]
+#          Va, Vb, Vd and Vc in kcal/mol
+#          cos4 Va Vb Vc Vd
+dih_type 6
+1                     cos3      0.00000000      6.73892094      0.00000000           # cos3->(c3_c2h1@ph,c3_c2h1@ph,c3_c2h1@ph,h1_c1@ph)|benzene
+2                     cos3      0.00000000           $d3_1      0.00000000           # cos3->(c3_c2h1@ph,c3_c3@ph,c3_c3@ph,c3_c2h1@ph)|ph-ph
+3                     cos3      0.00000000      7.12136361      0.00000000           # cos3->(c3_c2h1@ph,c3_c2h1@ph,c3_c2h1@ph,c3_c2h1@ph)|benzene
+4                     cos3      0.00000000      3.99774651      0.00000000           # cos3->(h1_c1@ph,c3_c2h1@ph,c3_c2h1@ph,h1_c1@ph)|benzene
+5                     cos3      0.00000000           $d1_1      0.00000000           # cos3->(c3_c2h1@ph,c3_c2h1@ph,c3_c3@ph,c3_c3@ph)|ph-ph
+6                     cos3      0.00000000           $d2_1      0.00000000           # cos3->(h1_c1@ph,c3_c2h1@ph,c3_c3@ph,c3_c3@ph)|ph-ph
+
+# Supported oop potentials harm
+# harm:    E(d) = k/2*(d-d0)**2
+#          k in mdyn/(rad*A), d0 in deg
+#          harm k d0
+# cos4:    E(d) = Va/2[1+cos(d)]+Vb/2[1-cos(d)]+Vc/2[1+cos(d)]+Vd/2[1-cos(d)]
+#          Va, Vb, Vd and Vc in kcal/mol
+#          cos4 Va Vb Vc Vd
+oop_type 2
+1                     harm           $o1_0      0.00000000           # harm->(c3_c3@ph,c3_c2h1@ph,c3_c2h1@ph,c3_c3@ph)|ph-ph
+2                     harm      0.04377691      0.00000000           # harm->(c3_c2h1@ph,c3_c2h1@ph,c3_c2h1@ph,h1_c1@ph)|benzene
+
+# Supported charge types
+# gaussian: q in e-, w in A
+#           gaussian q w 
+cha_type 3
+1                 gaussian      0.00000000      1.16298600           # gaussian->(c3_c3@ph)|ph-ph
+2                 gaussian     -0.13364100      1.16298600           # gaussian->(c3_c2h1@ph)|benzene
+3                 gaussian      0.13364100      0.72363800           # gaussian->(h1_c1@ph)|benzene
+
+# Suppoerted types
+# buck6d: ep in kcal/mol, r0 in A
+#         buck r0 ep
+vdw_type 3
+1                   buck6d      1.50000000      0.02000000           # buck6d->(h1_c1@ph)|benzene
+2                   buck6d      1.96000000      0.05600000           # buck6d->(c3_c2h1@ph)|benzene
+3                   buck6d      1.96000000      0.05600000           # buck6d->(c3_c3@ph)|ph-ph
+
+azone  1 12
+
+refsysname ph-ph
+
+variables 16
+     $a4_1    113.52402879    107.57211583    131.47703046   h   i
+     $a4_0      0.63297220      0.00000000      2.00000000   h   i
+     $a2_1    118.40868374    108.81405071    132.99495087   h   i
+     $a2_0      0.79045263      0.00000000      2.00000000   h   i
+     $d2_1      2.00351583      0.00000000      2.00000000   h   i
+     $d1_1      1.47395973      0.00000000      2.00000000   h   i
+     $a3_0      1.04466755      0.00000000      2.00000000   h   i
+     $a3_1    121.29191800    108.83542090    133.02106999   h   i
+     $b2_0      5.30900786      0.00000000      2.00000000   h   i
+     $b2_1      1.47326170      1.33713540      1.63427660   h   i
+     $o1_0      0.13245628      0.00000000      2.00000000   h   i
+     $b1_1      1.39998697      1.26653765      1.54799046   h   i
+     $b1_0      6.63069590      0.00000000      2.00000000   h   i
+     $a1_0      0.93222411      0.00000000      2.00000000   h   i
+     $a1_1    121.41368795    106.37189857    130.01009826   h   i
+     $d3_1      1.43236415      0.00000000      2.00000000   h   i

@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""test script to optimize all systems in the DB
+
+all systems with zero energy and not TS are picked and optimized
+"""
+
+import pylmps
+import molsys
+import sys
+import os
+import numpy as np
+import ast
+from molsys.util import RDB
+
+
+#
+# class defintions 
+#
+class base_calculator:
+
+    def __init__(self, mol, params : dict):
+        self.name = "base"
+        self.mol = mol
+        self.natoms = mol.get_natoms()
+        self.energy = 0.0
+        self.force  = np.zeros([self.natoms, 3], dtype="float64")  
+        return
+
+    def calc_energy(self):
+        print("You called the base class")
+        return self.energy
+
+    def calc_energy_force(self):
+        print("You called the base class")
+        return self.energy, self.force
+
+    def optimize(self,tconv=0.01,TS=False,rbonds=[]):
+        final_energy = 0.0
+        print("You called the base class")
+        return final_energy
+
+    def get_mol(self):
+        print("You called the base class")
+        return self.mol
+
+    def end(self):
+        print("You called the base class")
+        return
+
+class reaxff_calculator(base_calculator):
+
+    def __init__(self, mol, params : dict):
+        super(base_calculator, self).__init__()
+        self.pl = pylmps.pylmps("opt")
+        self.pl.setup(mol = mol, use_mfp5=False, local=True, ff="ReaxFF", reaxff=params["reaxff"])
+        return
+
+    def calc_energy(self):
+        return self.pl.calc_energy()
+
+    def optimize(self,tconv=0.01,TS=False,add_constraint=False,remove_constraint=False,rbonds=[],bondlength=[]):
+        ### default ####
+        forceconst = 1000.0
+        if TS or add_constraint:
+            print(rbonds)
+            for i in range(rbonds.shape[0]):
+                par = (forceconst, bondlength[i])
+                self.pl.add_restraint("bnd", tuple(rbonds[i]), par)
+        final_energy = self.pl.MIN(tconv)
+        if TS or add_constraint:
+            self.pl.clear_restraints()
+            if remove_constraint:
+               final_energy = self.pl.MIN(tconv)
+        self.pl.update_mol()
+        return final_energy
+
+
+    def get_mol(self):
+        return self.pl.mol
+
+    def end(self):
+        self.pl.end()
+        return
+
+class xtb_calculator(base_calculator):
+
+    def __init__(self, mol, params : dict):
+        super(base_calculator, self).__init__()
+        # sanity check(s)  
+        assert "gfnparam" in params, "GFN parameterization given" 
+        # setup
+        self.pl = pylmps.pylmps("opt")
+        # instantiate the external potential expot_xtb
+        ep = pylmps.expot_xtb(mol,params["gfnparam"],verbose=0,maxiter=100)
+        # we need to register the objects callback as a global function
+        callback = ep.callback
+        # now add the expot object together with the name of the global callback
+        self.pl.add_external_potential(ep, "callback")
+        # setup xTB
+        self.pl.setup(local=True, use_mfp5=False, mol = mol, ff="xTB")
+        return
+
+    def calc_energy(self):
+        return self.pl.calc_energy()
+
+    def optimize(self,tconv=0.01,TS=False,add_constraint=False,remove_constraint=False,rbonds=[],bondlength=[]):
+        ### default ####
+        forceconst = 1000.0
+        if TS or add_constraint:
+            for i in range(rbonds.shape[0]):
+                par = (forceconst, bondlength[i])
+                self.pl.add_restraint("bnd", tuple(rbonds[i]), par)
+        final_energy = self.pl.MIN(tconv)
+        if TS or add_constraint:
+            self.pl.clear_restraints()
+            if remove_constraint:
+               final_energy = self.pl.MIN(tconv)
+        self.pl.update_mol()
+        return final_energy
+
+
+    def get_mol(self):
+        return self.pl.mol
+
+    def end(self):
+        self.pl.end()
+        return
+
+#
+# Helper functions
+#
+def get_mol_from_opt_spec(ospec):
+    # get mol object from DB
+    fname, mfpxf = db.opt_species.mfpx.retrieve(ospec.mfpx)
+    mfpxs = mfpxf.read().decode('utf-8')
+    mfpxf.close()
+    mol = molsys.mol.from_string(mfpxs)
+    mol.addon("graph")
+    mol.graph.make_comp_graph()
+
+    return mol
+
+#
+# Start of main program 
+#
+if len(sys.argv) < 4:
+    print ("usage:  opt_md_species <db_path> <stage> <start_lot> <cmd_file>")
+#    print ("usage:  opt_md_species <db_path> <mfp5_file> <stage> <start_lot> <cmd_file>")
+    exit()
+    
+
+db_path   = sys.argv[1]
+stage     = sys.argv[2]
+start_lot = sys.argv[3]
+cmd_file  = sys.argv[4]
+
+assert os.path.isfile(cmd_file), "command file exists!"
+
+print ("open database %s" % db_path)
+rdb = RDB.RDB(db_path)
+print("dealing with MD from stage %s" %stage)
+
+# get all entries in md_species not TS (access pydal  directly TBI: some clever routines in rdb to handle this)
+db = rdb.db
+
+reactions = db(db.reactions).select()
+
+start_lotID = rdb.get_lot(start_lot)
+
+# read param set. Examples are:
+# ------------------------------
+#params = { "calculator" : "reaxff" 
+#         , "lot"        : "ReaxFF"
+#         }
+#params = { "calculator" : "xtb" 
+#         , "gfnparam"   : 1
+#         , "lot"        : "GFN1-xTB"
+#         }
+
+# DFT could look like
+#params = { "calculator" : "turbomole" 
+#         , "method"     : "ridft"
+#         , "functional" : "tpssh"
+#         , "basis"      : "def2-TZVPP"
+#         , "lot"        : "RI-DFT/TPSSh/def2-TZVPP"
+#         }
+
+file = open(cmd_file, "r")
+content = file.read()
+params = ast.literal_eval(content)
+try:
+    lotID = rdb.get_lot(params["lot"])
+except:
+    lotID = None
+    print("There is no data in the database for lot %s" %params["lot"])
+
+#params = { "calculator" : "reaxff" 
+#         , "lot"        : "ReaxFF"
+#         }
+
+# sanity check(s)
+assert "calculator" in params, "Calculator defined"
+assert "lot" in params, "Level of Theory given for calculator"
+
+for r in reactions:
+    # if start lot does not match the source of reaction, pass
+    if start_lot != r.source:
+        continue
+    # get all species for this reaction
+    reac2spec = db((db.reac2spec.reactionsID == r)).select()
+    is_unimolecular = r["uni"]
+    # dry run to get rbonds
+    rbonds_list = []
+    for r2s in reac2spec:
+        specID = r2s["speciesID"]
+        ospec = db((db.opt_species.speciesID == specID) & (db.opt_species.lotID == start_lotID)).select().first()
+        if r2s["label"] == 0:
+           # get revent for this mdspecies
+           rbonds = ospec["rbonds"]
+           rbonds = np.array(rbonds)
+           nrbonds = len(rbonds)//2
+           rbonds.shape = (nrbonds, 2)
+           rbonds_list.append(rbonds)
+    for r2s in reac2spec:
+        specID = r2s["speciesID"]
+        ospec = db((db.opt_species.speciesID == specID) & (db.opt_species.lotID == start_lotID)).select().first()
+
+        # check if the optimized species is already in the database
+        inDB = False
+        #print('lotID = ', lotID)
+        if lotID != None:
+             ospec_cur_lot = db((db.opt_species.speciesID == specID) & (db.opt_species.lotID == lotID)).select().first()
+             #print('ospec_cur_lot = ', ospec_cur_lot)
+             if ospec_cur_lot != None:
+                 inDB = True
+        #print('inDB = ', inDB)
+        if inDB:
+            continue
+
+
+        mol = get_mol_from_opt_spec(ospec)
+        molg_init = mol.graph.molg
+        if r2s["label"] == 1 or r2s["label"] == -1: 
+           TS = False
+        elif r2s["label"] == 0:
+           TS = True
+        rbonds =  []
+        remove_constraint = False
+        if TS:
+           # get revent for this mdspecies
+           rbonds = ospec["rbonds"]
+           rbonds = np.array(rbonds)
+           nrbonds = len(rbonds)//2
+           rbonds.shape = (nrbonds, 2)
+        if is_unimolecular:
+           assert len(rbonds_list) == 1, "dimension of rbond list"
+           rbonds = rbonds_list[0]
+           remove_constraint = True
+        bondlength = []
+        if TS or is_unimolecular:
+           # all molecules are non-perioidc  .. just compute current bond distance
+           for i in range(nrbonds):
+               r = mol.xyz[rbonds[i,0]]-mol.xyz[rbonds[i,1]]
+               bondlength.append(np.sqrt((r*r).sum()))
+        #
+        # setup lammps and minimize with level of theory in lot (default ReaxFF)
+        #
+        if params["calculator"] == "reaxff":
+           calculator = reaxff_calculator(mol,params)
+           if "reaxff" not in params:
+               print("It will use the default reaxFF cho")
+               params["reaxff"] = "cho"
+        elif params["calculator"] == "xtb":
+           calculator = xtb_calculator(mol,params)
+        else:
+           print("Unknown calculator!")
+           sys.exit(1)
+        init_energy  = calculator.calc_energy()
+        final_energy = calculator.optimize(0.01,TS,is_unimolecular,remove_constraint,rbonds,bondlength)
+        print ("\n\n########################################")
+        print ("initial %12.6f  final %12.6f " % (init_energy, final_energy))
+        print ("########################################\n\n")
+        # store these results to the DB
+        # first update coords and get mol object back from lammps
+        opt_mol = calculator.get_mol()
+        opt_mol.addon("graph")
+        opt_mol.graph.make_comp_graph()
+        molg_opt = opt_mol.graph.molg
+        is_equal, error_code = molsys.addon.graph.is_equal(molg_init, molg_opt)
+        if error_code != 0:
+           print("Error during molgraph comparison!")
+           sys.exit(1)
+        # add to db newly optimized structure
+        changed = not is_equal
+        rbonds = ospec["rbonds"] # restore the old rbonds add_opt_species does not lik numpy arrays :-(
+        rdb.add_opt_species(opt_mol, params["lot"], final_energy, specID, path="",change_molg=changed,rbonds=rbonds)
+        calculator.end()
+
+

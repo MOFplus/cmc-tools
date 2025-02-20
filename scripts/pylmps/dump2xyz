@@ -1,0 +1,73 @@
+#!/usr/bin/env python3 -i
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#  Script to convert a lammps dump trajectory into an xyz format trajectory
+#
+############################################################################
+
+import numpy 
+import sys
+import molsys
+
+
+def write_xyz(f,xyz,idxs,elems):
+    order = numpy.argsort(idxs)
+    f.write(str(len(xyz))+'\n\n')
+    for i,idx in enumerate(order):
+        print((elems[idx],)+tuple(xyz[idx]))
+        f.write('%s %12.6f %12.6f %12.6f\n' % ((elems[idx],)+tuple(xyz[idx])))
+    #f.write('\n')
+    return
+
+
+print('usage: [dumpfile]')
+
+dump = sys.argv[1]
+name =  dump.rsplit('.',1)[-1]
+
+f = open(name+'.xyz','w')
+
+m = molsys.mol()
+
+df = open(dump,'r')
+df.readline();df.readline();df.readline()
+
+
+nsteps = 0
+atoms=False;atoms2=False
+natoms_flag=False
+idxs = []
+xyz = []
+elems = []
+for i,l in enumerate(df):
+    if atoms == False:
+        if l.count('ITEM: ATOMS') == 0:
+            continue
+        else: 
+            atoms=True
+            atoms2=False
+            continue
+    else:
+        if ((l.count('TIMESTEP') != 0) and (atoms2==True)):
+            write_xyz(f,xyz,idxs,elems) 
+            xyz = []
+            elems = []
+            idxs = []
+            atoms=False
+            atoms2=False
+            nsteps += 1
+            if nsteps % 100 == 0: print(nsteps)
+            continue
+        else:
+            atoms2 = True
+            ls = l.split()
+            idx = int(ls[0])-1
+            idxs.append(idx)
+            elems.append(ls[2])
+            xyz.append(numpy.array([float(x) for x in ls[3:6]]))
+        
+
+
+write_xyz(f,xyz,idxs,elems) 

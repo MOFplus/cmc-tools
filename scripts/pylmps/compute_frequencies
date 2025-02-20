@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to apply the ricfit analysis for a moelcular system
+#
+#########################################################################
+
+#import ff_gen.IOmod as IOmod
+import molsys.stow as stow
+import molsys
+import pylmps
+from ff_gen.utils import hessutils
+import shutil
+import numpy
+import sys
+import os
+import copy
+import pickle
+
+mfpx = sys.argv[1]
+name = mfpx.rsplit('.',1)[0]
+
+if len(sys.argv) > 2:
+    optimize=float(sys.argv[2])
+else:
+    optimize=None
+
+
+m = molsys.mol.from_file(mfpx)
+
+m.addon('ff')
+try:
+    m.ff.read(name)
+except:
+    print('warning, reading FF with fit=True flag')
+    m.ff.read(name,fit=True)
+    
+pl = pylmps.pylmps(name)
+kspace = True
+if m.bcond == 0:
+    # this is not perdiodic , switch off kspace
+    kspace = False
+pl.setup(mol=m, kspace=kspace, bcond=m.bcond)
+
+if optimize != None:
+    ###  tbi: run optimization
+    pl.MIN(optimize)
+
+hess = hessutils.doublehessian(pl)
+hessian = hess()
+hu = hessutils.hessutils(pl.get_xyz(),hessian,pl.get_elements())
+hu.write_molden_input(name+'.freq')
+
+pickle.dump(hessian,open('hessian.pickle','wb'))

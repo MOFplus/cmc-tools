@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+""" script to analyze xTB trajectories
+
+"""
+
+import os
+import sys
+
+import molsys
+from molsys.fileIO import formats
+
+from molsys.util.findR_classes import species
+
+from graph_tool import Graph, GraphView
+import graph_tool.topology as gtt
+import graph_tool.util as gtu
+import graph_tool.draw as gtd
+
+import graph_tool
+
+import numpy as np
+
+if len(sys.argv) < 1:
+    print ("usage: analyze_xtb_traj <trajectory>")
+    exit()
+    
+#
+# Read command line arguments
+#
+ftrj_path   = sys.argv[1]
+
+#
+# Convert trajectory to list of mol objects
+#
+ftrj = open(ftrj_path, "r")
+frames = []
+
+while True:
+  try:
+     m = molsys.mol()
+     formats.read["xyz"](m,ftrj)
+     frames.append(m)
+  except:
+     break
+
+ftrj.close() 
+print(" I read %d frames" % len(frames) )
+
+if not os.path.exists("species"):
+  os.makedirs("species")
+
+
+fid = 1
+num_species_old = 0
+for frm in frames:
+   if not frm == None:
+      frm.detect_conn()
+      frm.addon("graph")
+      frm.graph.make_graph()
+      mol = frm
+      xyz = mol.get_xyz()
+      #
+      molg = frm.graph.molg
+      molg.vp.mid  = molg.new_vertex_property("int")
+      mid, hist = gtt.label_components(molg, vprop=molg.vp.mid)
+      #
+      nspecies_all = len(hist)
+      nspecies = []
+
+      for i in range(nspecies_all):
+          track = True
+          if track:
+              nspecies.append(i)
+      if num_species_old != nspecies_all:
+         num_species_old = nspecies_all
+         print("Change in frame %i num_species %i" % (fid,nspecies_all))
+      specs = {}
+      # append the species
+      counter = 0
+      for s in nspecies:
+         specs[s] = species(fid, s, molg, make_graph=True, tracked=True)
+      for s in specs:
+         sp = specs[s]
+         m = sp.make_mol(xyz[list(sp.aids)], mol)
+         framedir = "species/frame" + str(fid)
+         if not os.path.exists(framedir):
+            os.makedirs(framedir)
+         m.write(framedir + "/spec_" + str(counter) + "_in_frame" + str(fid) + ".xyz")
+         counter += 1
+
+      fid += 1
+

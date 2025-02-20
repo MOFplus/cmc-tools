@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+
+import os
+import sys
+import molsys
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from molsys.util import RDB
+from molsys.util import refine_qm_turbomole
+
+
+# input
+if len(sys.argv) < 2:
+    print ("usage:  analyse_qm_statistics <db_path> <dft_path>")
+    exit()
+
+test = True
+
+db_path   = os.path.abspath(sys.argv[1])
+dft_path  = os.path.abspath(sys.argv[2])
+rdb = RDB.RDB(db_path)
+db = rdb.db
+ 
+
+dft_subdir_paths = []
+for path in os.listdir(dft_path):
+   dft_subdir_path = os.path.join(dft_path, path)
+   if os.path.isdir(dft_subdir_path):
+       dft_subdir_paths.append(dft_subdir_path)
+
+
+MS  = 0
+NF  = 0
+MF  = 0
+SCF_spec = 0
+SCF_woelf = 0
+MGC = 0
+GF_TS_woelf = 0
+GF_TS_pre = 0
+GF_TS = 0
+EP  = 0
+CF = 0
+FC  = 0
+FNC = 0
+B   = 0
+for dft_subdir_path in dft_subdir_paths:
+    f_json = os.path.join(dft_subdir_path,'r.json')
+    if os.path.isfile(f_json):
+         with open(f_json) as f:
+             data = json.load(f)
+             for rxn in data:
+                 r  = data[rxn]['reaction']
+                 print(r['origin'])
+                 try:
+                     if r['barrierless']: B += 1
+                 except:
+                     opt_spec = data[rxn]['opt_spec']
+                     barrierless = True
+                     for i in opt_spec:
+                         spec_info = opt_spec[i]
+                         if spec_info['itype'] == 0: barrierless = False
+                     if barrierless: B += 1
+                 if r['change']: 
+                     FC += 1
+                 else:
+                     FNC += 1
+
+    f_out = os.path.join(dft_subdir_path,'submit.out')
+    if os.path.isfile(f_out):
+        f = open(f_out,'r').read()
+        if 'The optimised structure has more than a single molecule' in f: MS += 1
+        if 'No imaginary frequency at the start structure' in f: NF += 1
+        if 'There are more than one imaginary frequencies at the start structure' in f: MF += 1
+        if 'The SCF calculation with Fermi smearing did not converge also with start damping 2.0' in f: SCF_spec += 1
+        if 'The SCF did not converge in one of the structures' in f: SCF_woelf += 1
+        if 'The TS guess from woelfling calculation did not converge' in f: GF_TS_woelf += 1
+        if 'The TS pre-optimization did not converge' in f: GF_TS_pre += 1
+        if 'The transition state optimization did not converge' in f: GF_TS += 1
+        if 'The graph still changes with the multiplicity' in f: MGC += 1
+        if 'The educt and the product is the same' in f: EP += 1
+        if 'is not isomorphic to the graph of the fragment of' in f: CF += 1
+
+GF = GF_TS_pre + GF_TS_woelf
+SCF = SCF_spec + SCF_woelf
+
+fig, ax = plt.subplots(figsize=(9, 4), subplot_kw=dict(aspect="equal"))
+
+recipe = ["%d more than a single molecule" %MS,
+          "%d TS no im freq" %NF,
+          "%d TS more than one im freq" %MF,
+          "%d scf convergence problem" %SCF,
+          "%d geometry did not converge" %GF,
+          "%d educt and the product is the same" %EP,
+          "%d no eq spec without MG change" %MGC,
+          "%d complex could not be generated" %CF,
+          "%d barrierless" %B,
+          "%d found, reaction graph changed" %FC,
+          "%d found, reaction graph did not change" %FNC]
+
+
+
+data   = [MS,       NF,        MF,         SCF,      GF,        EP,        MGC,       CF,        B,         FC,       FNC]
+colors = ['#9f5ad1','#8fb5c9', '#144e6e', '#cf2715', '#6e070f', '#9c0897', '#8c708b', '#d18c2c', '#798c70', '#4f7552', '#203622']
+
+wedges, texts = ax.pie(data, wedgeprops=dict(width=0.5), startangle=-40, colors = colors)
+
+bbox_props = dict(boxstyle="square,pad=0.1", fc="w", ec="k", lw=0)
+kw = dict(arrowprops=dict(arrowstyle="-"),
+          bbox=bbox_props, zorder=0, va="center")
+
+for i, p in enumerate(wedges):
+    ang = (p.theta2 - p.theta1)/2. + p.theta1
+    y = np.sin(np.deg2rad(ang))
+    x = np.cos(np.deg2rad(ang))
+    horizontalalignment = {-1: "right", 1: "left"}[int(np.sign(x))]
+    connectionstyle = "angle,angleA=0,angleB={}".format(ang)
+    kw["arrowprops"].update({"connectionstyle": connectionstyle})
+    ax.annotate(recipe[i], xy=(x, y), xytext=(1.35*np.sign(x), 1.4*y),
+                horizontalalignment=horizontalalignment, **kw)
+
+#plt.show()
+fname = os.path.join(dft_path,'statistics.png')
+plt.savefig(fname)

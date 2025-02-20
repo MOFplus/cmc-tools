@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+
+"""
+Turbomole interface for reaxff/lammps/pylmps
+
+reads a coord file from the current directory, does a sinlge point energy and writes energy and gradeint to a gradient like file
+
+"""
+
+import molsys
+import pylmps
+import tempfile
+from pathlib import Path
+import os
+
+cwd = Path.cwd()
+m = molsys.mol.from_file("coord", ftype="turbo")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    os.chdir(tmpdir)
+    pl = pylmps.pylmps("TM")
+    pl.setup(local=True, mol=m, ff="ReaxFF", bcond=0)
+    e = pl.energy
+    f = -pl.get_force()
+    os.chdir(cwd)
+    pl.mol.write("gradient", ftype="turbo", gradient=f, energy=e, cycle = 1)
+    pl.end()
+
+
+
+
+
+

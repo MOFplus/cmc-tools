@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to convert different structure file formats based on molsys
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys.mol as mol
+import molsys
+from molsys.util import plotter
+fi = sys.argv[1]
+fi_type = fi.split('.')[-1]
+try:
+    radius = float(sys.argv[2])
+except:
+    radius = 3.00
+m = mol()
+m.read(fi, ftype = fi_type)
+
+if fi_type == 'xyz':
+    m.detect_conn(remove_duplicates = True)
+    m.set_nofrags()
+
+p = plotter.plotter(m)
+p.write_vmd_bondindices(filename='bonds.tcl',maxlength = radius)
+
+
+
+#m.write(fo, ftype = fo_type)

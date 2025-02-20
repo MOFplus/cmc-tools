@@ -1,0 +1,492 @@
+#! /usr/bin/env python3
+"""
+
+            assign_FF  2024
+
+(C) RS RUB 2024
+
+New script to assign force fields in an interactive way. 
+
+ToDo 
+- add more CLI options
+- add fixup of unassigend terms for fit setup
+
+
+"""
+
+import molsys
+import sys
+import os
+import mofplus
+from molsys.util.timer import timer, Timer
+from molsys.util.aftypes import aftype, aftuple, afdict
+
+import itertools
+from pathlib import Path
+import argparse
+
+# import logging
+# logging.basicConfig(filename="assign_FF.log", filemode="a", level=logging.ERROR)
+
+# new version of he script with interactive selections using prompt_toolkit
+try:
+    import prompt_toolkit as pt
+except ImportError:
+    print ("No prompt_toolkit found. Please install with 'pip install prompt_toolkit'")
+    sys.exit(1)	
+try:
+    from prettytable import PrettyTable
+except ImportError:
+    print ("No prettytable found. Please install with 'pip install prettytable'")
+    sys.exit(1)	
+
+ptprompt = pt.PromptSession()
+
+# load and init the lmpspots module
+# in order to have access to the reverse masks
+from pylmps import lammps_pots
+lpots = lammps_pots.lpots()
+lammps_pots.register_defaults(lpots)
+
+### some utility functions
+def ptchooser(ptext, pvalues, default=None):
+    completer = pt.completion.WordCompleter(pvalues)
+    if default == None:
+        mode = " (Tab for choices, default is all): "
+    else:
+        mode = f" (Tab for choices, default is {default}): "
+    selection = ptprompt.prompt(ptext+mode, completer=completer)
+    if selection == "":
+        if default != None:
+            return [default]
+        else:
+            return pvalues
+    else:
+        return selection.strip().split()
+
+### a helper function to preprocess the raw param data comming from MOFplus
+# on this side (MOFplus) params can be wildcarded or truncated or both
+# therefore we use the aftypes objects which can be used for comparison. Note, that on the molecule side params are always complete
+def curate_params(ric, raw_par):
+    nbody = {"bnd" : 2, "ang" : 3, "dih" : 4, "oop" : 4, "cha" : 1, "vdw" : 1}
+    params = afdict(ric=ric) # this is a dictionary of aftuple objects (knows its ric to do permutations)
+    params.unset_retrieve_mode()
+    for pentry in raw_par:
+        parval = pentry["params"]
+        pot = pentry["pot"]
+        pname = [aftype(atypes[pentry["atype%1d"%(i+1)]], frags[pentry["frag%1d"%(i+1)]]["name"]) for i in range(nbody[ric])] # this is just a list of the aftypes (cold be truncated or wildcarded)
+        pname = aftuple(pname, ric=ric)
+        if pname not in params:
+            params[pname] = [(pot, parval)]
+        else:
+            params[pname].append((pot, parval))
+    return params
+
+####################################### MAIN ########################################
+
+print ("""
+                  assign_ff
+                  =========
+
+(C) CMC group RUB 2024 (R. Schmid)  
+
+New interactive FF assignement tool for pylmps (different from assign_FF in molsys)
+       
+""")
+
+# parse optional CLI arguments especially for batch usage
+parser = argparse.ArgumentParser(description="Assign FF to a system")
+
+parser.add_argument("name", type=str, help="mfpx file to assign")
+parser.add_argument("--FF", type=str, help="FF name on MOFplus to be considered", action="append")
+parser.add_argument("--ref", type=str, help="Reference system name on MOFplus to be considered", action="append")
+args = parser.parse_args()
+name = Path(args.name)
+
+tm = Timer("ASSIGN_FF")
+# get runname and the mfpx file, load system
+root_name = name.stem
+m = molsys.mol.from_file(root_name + ".mfpx")
+
+if Path(root_name + ".ric").exists() and Path(root_name + ".par").exists():
+    print (f" -- Parameter files {root_name}.ric and {root_name}.par already exists")
+    print (" -- Do you want to load existing params or overwrite them?")
+    reload = ptchooser("Load ric/par or overwrite?", ["Load", "Overwrite"], default="Overwrite")[0]
+    if reload == "Load":
+        print (" -- Loading existing ric/par files")
+        m.ff.read(root_name)
+
+# do this in the first place without the cache (we can implement such a thing later)
+# the idea is that there will be no changes in the database during an assigenemnt and we can cache all requests locally.
+
+mfpapi = mofplus.api() # open mofplus api connection with defaults ... could allow changes here
+print ("""
+Connecting to MOFplus API
+------------------------
+""")
+# now we need to connect and get the credentials first
+
+# try to get credentials for a login to MOFPLUS
+mode = ""
+try:
+    username, pw = mfpapi.credentials_from_rc()
+    mode = ".mfprc file"
+except IOError:
+    try:
+        print (" -- no .mofplusrc file")
+        username = os.environ['MFPUSER']
+        pw       = os.environ['MFPPW']
+        mode = "environment variables"
+    except KeyError:
+        print (" -- no environment variables")
+        username = ptprompt.prompt("Username: ")
+        pw = ptprompt.prompt("Password: ", is_password=True)
+        mode = "prompt"
+
+print (f" -- Got credentials for {username} from {mode}\n -- trying to connect")
+status = mfpapi.connect(username, pw)
+if status == None:
+    print (f" -- Connection failed")
+    sys.exit(1)
+else:
+    print (" -- Connection successful\n")
+
+sp_atypes = mfpapi.get_special_atypes()
+m.addon("ff", special_atypes= sp_atypes) # TODO: what about smallrings?
+
+# first we need to get all the aftypes from the mfp file
+aftypes = [aftype(aft.atype, aft.fragtype) for aft in m.ff.aftypes]
+# in order to assign aromatic fragments as if they were phenyl we need a second set of aftypes with the aromatic fragments replaced by phenyl
+phenyl_like = ["naph"] # TODO load from MOFplus
+aftypes2 = [aftype(aft.atype, "ph" if aft.fragtype in phenyl_like else aft.fragtype) for aft in aftypes]
+
+# before we start we make a list of rnames for each ric, becasue we need these later anyway
+rnames = {}
+for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+    rnames[ric] = [aftuple([aftypes[i] for i in r], ric=ric) for r in m.ff.ric_type[ric]]
+rnames2 = {}
+for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+    rnames2[ric] = [aftuple([aftypes2[i] for i in r], ric=ric) for r in m.ff.ric_type[ric]]
+
+
+saft = list(set(aftypes))
+saft.sort()
+saft= "\n -- " + "\n -- ".join([str(a) for a in saft])
+
+print (f"""
+Assigning FF for {root_name} with {m.get_natoms()} atoms.
+The system contains the following aftpyes (atomtypes and fragmenttypes):
+{saft}
+""")
+
+print ("All available FFs from MOFplus") 
+# get all accesible FFs from MOFplus
+ffs = mfpapi.get_FF() # we get a dicitionary keyed by the name
+ff_list = list(ffs.keys())
+fftab = PrettyTable()
+fftab.field_names = ["Name", "Private", "Comment"]
+for f in ff_list:
+    fftab.add_row([f, f'{"X" if ffs[f]["private"] else "   "}', ffs[f]["comment"]])
+print (fftab)
+if args.FF != None:
+    sel_ff = [f for f in args.FF if f in ff_list] # CLI arguments have been given
+    print (f" -- FFs selected from CLI: {sel_ff}")
+else:
+    sel_ff = ptchooser("\nSelect FF (None for bypassing MOFplus)", ff_list + ["None"], default="MOF-FF")
+if sel_ff[0] == "None":
+    print (" -- WARNING: Parameter assignement from MOFplus will be bypassed ")
+    sel_ff = []
+else:
+    sel_ff_id = [ffs[s]["id"] for s in sel_ff]
+
+if len(sel_ff) > 0:
+    # only if we have selected FFs we need to go on with the assignement
+    # TODO check if these refsystems have fits that are part of the chosen selection of FFs ... otherwise we can discard them anyway.
+    #          --> needs preloading fit stuff for all refsystems or we check this server side and send refsys only if accesible fits exist.
+    print ("\nGet potential reference systems from MOFplus")
+    with tm("get refsystems"):
+        # now select all reference systems of relevance
+        frags = m.fragments.get_fragnames()
+        ref_dict = mfpapi.get_refs_from_frags(frags)
+        all_refs = []
+        for f,r in ref_dict.items():
+            all_refs.extend(r)
+        all_refs = list(set(all_refs))
+        refs = []
+        frags = set(frags)
+        frag_dict = mfpapi.get_frags_from_refs(all_refs)
+        for r,fs in frag_dict.items():
+            if len(set(fs) - frags) == 0: # that means all fragments of the refsystem are present in the system
+                refs.append(r)
+        # get info for all refs
+        ref_dict = {}
+        for r in refs:
+            ref_dict.update(mfpapi.get_FFrefs(name=r))
+        refs.sort(key=lambda x: ref_dict[x]["priority"], reverse=True)
+        rtab = PrettyTable()
+        rtab.field_names = ["Priority", "Name", "Comment"]
+        for r in refs:
+            rd = ref_dict[r]
+            rtab.add_row([rd["priority"], r, rd["comment"]])
+        print (rtab)
+        if args.ref != None:
+            sel_ref = [r for r in refs if r in args.ref] # CLI arguments have been given
+            print (f" -- Refsystems selected from CLI: {sel_ref}")
+        else:
+            sel_ref = ptchooser("\nSelect reference system", refs)
+        sel_ref_dict = {}
+        for r in sel_ref:
+            sel_ref_dict[r] = ref_dict[r]
+        ref_dict = sel_ref_dict # drop all we do not need anymore
+            
+    with tm("get fits"):
+        # get the corresponding fits for the selected refsystems and selected FFs
+        fit_dict = {}
+        for r in list(sel_ref_dict.keys()):
+            fits = []
+            for ff in sel_ff_id:
+                fits.extend(mfpapi.get_FFfits(refID1=sel_ref_dict[r]["id"], FFID=ff))
+            # if there is no fit for the refsys in the chosen FFs we delete the refsys from the list
+            if len(fits) == 0:
+                del ref_dict[r]
+            else:
+                fit_dict[r] = fits
+        # now we need to select the fits for each refsystem if there is more than one
+        # first we just use Prettytable to show what we have found
+        for r in fit_dict:
+            fits = fit_dict[r]
+            if len(fits) == 1:
+                print (f"\nOnly one FF fit for refsystem {r}:")
+            else:
+                print (f"\nAvailable FF fits for refsystem {r}:")
+            ftab = PrettyTable()
+            ftab.field_names = ["#", "Created", "Comment", "Generic aftypes", "Aromatic fragments"] # TODO need more details here but there might also be changes in the DB necessary
+            for i,f in enumerate(fits):
+                gen_aft = "X" if f["generic_atypes"] else ""
+                gen_arom = "X" if f["arom_frag"] else ""
+                ftab.add_row([i+1, f["creationtime"], f["comment"], gen_aft, gen_arom])  # TODO: shall we ask if arom_frags to be used or do it if it is set?
+            print (ftab)
+            if len(fits) == 1:
+                sel_fit = 0
+            else:    	
+                sel_fit = ptchooser("\nSelect fit", [str(i+1) for i in range(len(fits))], default="1")
+                sel_fit = int(sel_fit[0]-1)
+            fit_dict[r] = fits[sel_fit]
+
+    with tm("get frag graphs"):
+        # as a next step we need to retrieve the fraggraphs for all refsystems
+        rmol = {}
+        for r in ref_dict:
+            rmol[r] = mfpapi.get_mol_from_db(ref_dict[r]["graph"])
+            rmol[r].addon("fragments")
+            rmol[r].fragments.make_frag_graph()
+            ## DEBUG DEBUG
+            # rmol[r].fragments.frag_graph.save(f"{r}_fgraph.gt")
+            # rmol[r].write(f"{r}.mfpx")
+
+    print ("\nDetecting reference systems by subgraph search on fragment graph of the system")
+    with tm("detect refsystems"):
+        rfrags = {}
+        ratoms = {}
+        # DEBUG DEBUG
+        # for v in m.fragments.frag_graph.vertices():
+        #     print (f" -- Vertex {v} {m.fragments.frag_graph.vp.type[v]}{m.fragments.frag_graph.vp.type2[v]}")
+        for ref in list(ref_dict.keys()):
+            print (" -- Searching for refsys %s" % ref)
+            if fit_dict[ref]["arom_frag"]:
+                print (" --    Searching on fragment graph with aromatic fragments replaced by ph")
+                rfidx = m.graph.find_subgraph(m.fragments.frag_graph, rmol[ref].fragments.frag_graph, graph_property=m.fragments.frag_graph.vp.type2)
+            else:
+                rfidx = m.graph.find_subgraph(m.fragments.frag_graph, rmol[ref].fragments.frag_graph)
+            if len(rfidx) > 0:
+                raidx = []
+                for rf in rfidx:
+                    a = []
+                    for f in rf:
+                        a.extend(m.fragments.frag_graph.vp.atom_map[f])
+                    raidx.append(a)
+                rfrags[ref] = rfidx
+                ratoms[ref] = raidx
+                print ("       Found %d subgraphs" % len(rfidx))	
+            else:
+                print ("       seems not to occur -> deleting %s" % ref)
+                del ref_dict[ref]
+
+    # at this point we need to check if there are any atfix entries in the fit systems to be applied
+    # for the moment we apply all atfixes irrespective if the refsystem is used (this could be dangerous)
+    # and we keep these changes in the global aftypes list in the ff addon ... note: this is not in the mol object itself and 
+    # will not be written to the mfpx file 
+    # it might be better to have a copy of aftypes for each refsystem and use this for assignement only
+    # with tm("apply atfixes"):
+    #     for ref in ref_dict:
+    #         if fit_dict[ref]["atfix"] != None:
+    #             atfix = fit_dict[ref]["atfix"]
+
+    ### get all the frag and atype names to build the potential names later
+    with tm("collect frag and atype entries"):
+        frags = mfpapi.get_FFfrags_all()
+        atypes = mfpapi.get_atypes()
+
+
+    print ("\nCollecting FF parameters from MOFplus for the detected refsystems")
+    ### collect all params of the relevant refsystems from the database
+    with tm("download and curate all params"):
+        ref_params = {}
+        for ref in ref_dict:
+            print (f" -- Download params for refsystem {ref} from MOFplus")
+            ric_pars = {}
+            for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+                ric_pars[ric] = curate_params(ric, mfpapi.get_params(ric, str(fit_dict[ref]["id"]))) # fitid needs to be a string
+            ref_params[ref] = ric_pars
+
+    ### main loop of assignement
+    # things tested and found to work:
+    # - instead of testing ric against each of the refsystem subsys make a flat set for each refsys (improvement is 2 orders of mag in execution time per iteration)
+    #      use code from here: https://stackoverflow.com/questions/952914/how-do-i-make-a-flat-list-out-of-a-list-of-lists
+    print ("\nAssigning FF parameters to the system")
+    with tm("identify rics in refsystems and assign params"):
+        ref_atomsets = {}
+        for ref in ref_dict:
+            flat = itertools.chain.from_iterable(ratoms[ref])
+            ref_atomsets[ref] = set(flat)
+        for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+            for ref in ref_dict:
+                ref_params[ref][ric].set_retrieve_mode()
+            print (" -- Assigning %s terms" % ric)
+            parind = m.ff.parind[ric]
+            par = m.ff.par[ric]
+            param_substitutions = []
+            with pt.shortcuts.ProgressBar() as pb:
+                for i,r in pb(enumerate(m.ff.ric_type[ric]), total=len(m.ff.ric_type[ric])): # r is the atom index list of the specific ric
+                    if parind[i] == None:
+                        rname  = rnames[ric][i]
+                        rname2 = rnames2[ric][i] # alternative name if aromatic frags are cast to ph
+                        sr = set(r)
+                        # loop over all relevant refsystems and check if we have a match
+                        for ref in ref_dict:
+                            par_dict = ref_params[ref][ric]
+                            sref = ref_atomsets[ref]
+                            if fit_dict[ref]["arom_frag"]:
+                                rn = rname2
+                            else:
+                                rn = rname
+                            if sr.issubset(sref):
+                                if rn in par_dict:
+                                    pnames = [] # the pname is a list .. if there are more than one potential acting on this ric we append
+                                    for e in par_dict[rn]:
+                                        pot, parval = e
+                                        if pot != "equiv":  # this is a hack to remove the equiv stuff which is in the DB ... hope not to need this in the future anymore.
+                                            if par_dict.found_full:
+                                                pn = f"{pot}->{rn!s}|{ref}" # with "!s" we force the string representation of the aftuple
+                                            else:
+                                                pn = f"{pot}->{par_dict.replaced_key!s}|{ref}" # in case of a wildcarded or truncated param we need to use the replaced key
+                                            # DEBUG logging
+                                            # logging.debug(f" -- Found {ric} params for atoms {r} with name {rn} in refsystem {ref} as {pn}")
+                                            if pn not in par:
+                                                if not par_dict.found_full and par_dict.reversed and ric in ["ang", "dih"]:
+                                                    # need to reverse the params with the help of lammps_pots reverse masks
+                                                    parval = lpots.rics[ric][pot].revert_params(parval)
+                                                par[pn] = (pot, parval) # add tuple from pot and values to par dictionary if not there yet
+                                                if fit_dict[ref]["arom_frag"] and rname != rname2:
+                                                    param_substitutions.append((rname, pn))
+                                                # Note: flags found_full and reversed are valid until next ref loop
+                                                # print (f"DEBUG: got {ric} params for {pn}: full={par_dict.found_full} reversed={par_dict.reversed}")
+                                            pnames.append(pn)
+                                    parind[i] = pnames
+                                    # we have found a matching parameter for the ref system and have to leave the loop (no need to check further refsystems)
+                                    break
+            if len(param_substitutions) > 0:
+                print (f" -- Substituting {len(param_substitutions)} aromatic fragment params")
+                for rname, pn in param_substitutions:
+                    print (f"      {rname} -> {pn}")
+
+
+######################### Done with assignement ########################################
+
+def check_unassigned():
+    ### check which params could not be assigned:
+    print ("\nChecking for unassigned terms")
+    unassigned = {}
+    idx_ua = {}
+    is_unassigned = False
+    ua_tab = PrettyTable()
+    ua_tab.field_names = ["RIC", "term", "# occurences"]
+    for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+        parind = m.ff.parind[ric]
+        ua_terms = []
+        ua_idx = []
+        for i,r in enumerate(m.ff.ric_type[ric]):
+            if parind[i] == None:
+                is_unassigned = True
+                rname = rnames[ric][i]    
+                if not rname in ua_terms:
+                    ua_terms.append(rname)
+                    ua_idx.append([i])
+                else:
+                    idx = ua_terms.index(rname)
+                    ua_idx[idx].append(i)
+        unassigned[ric] = ua_terms
+        idx_ua[ric] = ua_idx
+        for i in range(len(ua_terms)):
+            divider = (i == len(ua_terms)-1)
+            ua_tab.add_row([ric if i==0 else "", str(ua_terms[i]), len(ua_idx[i])], divider=divider)
+            # logging.debug(f" Unassigned {ric} term {ua_terms[i]} with {len(ua_idx[i])} occurences: ")
+            # for j in ua_idx[i]:
+            #     logging.debug(f" -- Atoms: {m.ff.ric_type[ric][j]}")
+    if is_unassigned:
+        print (ua_tab)
+    else:
+        print ("no unassigned terms found")
+    return (is_unassigned, unassigned, idx_ua)
+
+is_unassigned, unassigned, idx_ua = check_unassigned()
+
+# now we can fix up missing params using fit entries and write out
+
+if not is_unassigned:
+    print ("\nAll terms in the system could be assigned from MOFplus")
+else:
+    print ("\nSome terms could not be assigned (see table above)")
+    print (" -- adding missing terms as to be fit")
+    print (" -- Need to set a refernce system name here")
+    m.ff.refsysname = ptchooser("Reference system", [root_name], default=root_name)[0]
+    # now we cycle through options until all is assigned or fixed up
+    while is_unassigned:
+        print ("\nOptions:")
+        print (" Fixup RICs with unassigned terms")
+        print (" Drop RICs with unassigned terms")
+        print (" Charges for topoQEq")
+        choice = ptchooser("Select option", ["Fixup_RICs", "Drop_RICs", "Charges"], default="Fixup_RICs")[0]
+        print (choice)
+        if choice == "Drop_RICs":
+            ua_rics = [ric for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"] if unassigned[ric] != []]
+            rictype = ptchooser("Select RIC type", ua_rics)[0]
+            check = [(idx_ua[rictype][i], str(unassigned[rictype][i])) for i in range(len(unassigned[rictype]))]
+            chosen = pt.shortcuts.checkboxlist_dialog(title=f"Unassigned {rictype} terms", text="Select terms to be droped", values=check).run()
+            # now delete all the chosen rics in the ff addon (ric itself and parind)
+            # flatten list of lists and sort in reverse order .. then del each element
+            chosen = sorted(list(itertools.chain.from_iterable(chosen)), reverse=True)
+            for i in chosen:
+                del m.ff.parind[rictype][i]
+                del m.ff.ric_type[rictype][i]
+        else:
+            print ("TOBEDONE!!!!  ")
+        
+        is_unassigned, unassigned, idx_ua = check_unassigned()
+
+
+
+self_ff = " ".join(sel_ff)
+print (f"-- Setting {self_ff} as FF for the system")
+print ("-- Writing FF to file ric/par")
+ff_fname = ptchooser("Write FF to file", [root_name], default=root_name)[0]
+m.ff.par.FF = sel_ff
+m.ff.write(ff_fname)
+
+print ("\nWe are done!")
+print ("\n\n\nTimer reports")
+m.fragments.report()
+m.ff.report()
+tm.report()
+
+

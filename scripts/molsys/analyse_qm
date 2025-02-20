@@ -1,0 +1,593 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+""" script to calculate the reaction and activation energies, and calculate rate constants after QM calculations
+    by reading the information from the database
+"""
+
+import pylmps
+import molsys
+import sys
+import os
+import time
+import numpy as np
+import ast
+from molsys.util import RDB
+from molsys.util import refine_qm_turbomole
+from scipy import constants
+import gzip
+import shutil
+#from   molsys.util.units import kjmol
+
+
+kjmol = 1.0/(constants.value("hartree-joule relationship")*constants.N_A*1.E-3)
+
+#
+# Helper functions
+#
+def get_mol_from_opt_spec(ospec):
+    # get mol object from DB
+    fname, mfpxf = db.opt_species.mfpx.retrieve(ospec.mfpx)
+    mfpxs = mfpxf.read().decode('utf-8')
+    mfpxf.close()
+    mol = molsys.mol.from_string(mfpxs)
+    mol.addon("graph")
+    mol.detect_conn()
+    mol.graph.make_graph()
+    return mol
+
+def get_opt_spec_path(ospec):
+    fname, mfpxf = db.opt_species.mfpx.retrieve(ospec.mfpx)
+    ospec_mfpxf_path = mfpxf.name
+    mfpxf.close()
+    return ospec_mfpxf_path
+
+def get_md_spec_mfpx(md_spec):
+    fname, mfpxf = db.md_species.mfpx.retrieve(md_spec.mfpx)
+    md_spec_mfpxf_path = mfpxf.name
+    mfpxf.close()
+    return md_spec_mfpxf_path
+
+def proper_dens(path):
+    curdir = os.getcwd()
+    os.chdir(path)
+
+    sdf = os.path.join(path, "sd.plt")
+    RHF = False
+    if not os.path.isfile("sd.plt"):
+        # Unzip the molecular orbitals
+        for f in ['alpha','beta','mos']:
+            print(os.path.isfile(f+'.gz'))
+            if os.path.isfile(f+'.gz'):
+                with gzip.open(f+'.gz', 'rb') as f_in:
+                    with open(f, 'wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+    
+        # Add to the control file pointval dens
+        control = open('control').read()
+        if '$closed shells' in control and '$open shells' not in control:
+            RHF = True
+        else:
+            if '$rij' in control:
+                scf = "ridft"
+            else:
+                scf = "dscf"
+            dg="pointval dens"
+            os.system("kdg end")
+            os.system('''echo "\$%s" >> control''' %dg)
+            os.system('''echo "\$end" >> control''')
+            os.system("%s -proper" %scf)
+#            f = open("proper.in","w")
+#            f.write("grid\ndens\n\nq")
+#            f.close()
+#            os.system("proper < proper.in > proper.out")
+            assert os.path.isfile("sd.plt"), "sd.plt file is generated unter %s" %path
+        # Zip the molecular orbitals
+        for f in ['alpha','beta','mos']:
+            if os.path.isfile(f):
+                with open(f, 'rb') as f_in, gzip.open(f+'.gz', 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                os.remove(f)
+   
+    elif not RHF:
+        print("The file %s already exists." %sdf)
+    os.chdir(curdir)
+    print(path, RHF)
+    return RHF, sdf
+
+def makethumbnail(path, with_sd=True, sdf="sd.plt"): 
+    from molsys.util import thumbnail
+    curdir = os.getcwd() 
+    mol = molsys.mol.from_file(os.path.join(path,"coord"),"turbo")
+    fimg = "coord.png"
+    if mol.get_natoms() < 5:
+        size = 200
+        scale = 1.0
+    else:
+        size = 300
+        scale = 1.3
+    os.chdir(path)
+
+    # Generate the thumbnails
+    thumbnail.thumbnail(mol, transparent=True, size=size, scale=scale, fname=fimg, own_bonds=False, with_sd=with_sd, sdf=sdf)
+
+    os.chdir(curdir)
+    fimg = os.path.join(path, "coord.png")
+    return fimg
+
+def get_fimg(path, with_sd, make_png):
+    if with_sd and make_png:
+        RHF, sdf = proper_dens(path=path)
+        if RHF:
+            fimg = makethumbnail(path=path, with_sd=False)
+        else:
+            fimg = makethumbnail(path=path, with_sd=with_sd, sdf=sdf)
+        assert os.path.isfile(fimg), "%s exist" %fimg
+
+    elif not with_sd and make_png:
+        fimg = makethumbnail(path=path, with_sd=False)
+        assert os.path.isfile(fimg), "%s exist" %fimg
+
+    elif with_sd and not make_png:
+        sdf, RHF = proper_dens(path=path)
+        fimg = os.path.join(path,"coord.png")
+        if not os.path.isfile(fimg): fimg = ""
+
+    elif not with_sd and not make_png:
+        fimg = os.path.join(path,"coord.png")
+        assert os.path.isfile(fimg), "%s exist" %fimg
+    return fimg
+
+######################################################################################################################
+######################################################################################################################
+#
+# Start of main program 
+#
+if len(sys.argv) < 3:
+    print ("usage:  analyse_qm <db_path> <cmd_file>")
+    exit()
+    
+
+db_path   = os.path.abspath(sys.argv[1])
+cmd_file  = sys.argv[2]
+
+assert os.path.isfile(cmd_file), "command file exists!"
+# read param set. Examples are:
+# ------------------------------
+# DFT could look like
+#params = { "level"             : "level1:DFT" or "level2:DFT" or "level3:CC"
+#         , "lot"               : "ri-utpssh/TZVP"
+#         , "f_cor"             : 0.9874
+#         , "reaction_origin"   : [14,15,22,27,41,55,56,61,69,95,100,109]
+#         }
+
+file = open(cmd_file, "r")
+content = file.read()
+params = ast.literal_eval(content)
+
+# sanity check(s)
+assert "lot" in params, "Level of theory is given for the calculator"
+assert "level" in params, "The level of calculation is defined: level1:dft, level2:dft, level3:pno-ccsd"
+assert "f_cor" in params, "The ZPE correction factor is defined"
+level3 = False
+if "level3" in params["level"].lower():
+    assert "lot_CC" in params, "The coupled cluster level of theory for the electronic energies is defined"
+    level3 = True
+    lot_CC = params["lot_CC"]
+    print("The electronic energies will be taken from the level of theory %s." %lot_CC)
+
+Tstart=300.0 # K
+Tend=3000.0 # K
+numT=271
+P=0.1 # MPa
+if "Tstart" in params:
+    Tstart=params["Tstart"]
+if "Tend" in params:
+    Tend=params["Tend"]
+if "numT" in params:
+    numT=params["numT"]
+if "P" in params:
+    P=params["P"]
+if "verbose" in params:
+    verbose=params["verbose"]
+else:
+    verbose=False
+if "only_SPE" in params:
+    only_SPE = params["only_SPE"]
+else:
+    only_SPE=False
+if "view_reactions" in params:
+    view_reactions = params["view_reactions"]
+    assert "with_sd" in params, "with_sd is defined: True/False"
+    with_sd = params["with_sd"]
+    sdf = ""
+    if "make_png" in params:
+        make_png = params["make_png"]
+    else:
+        make_png = True
+    if "browser" in params:
+        browser = params["browser"]
+    else:
+        browser = "firefox"
+else:
+    view_reactions = False
+if "plotG" in params:
+    plotG = params["plotG"]
+else:
+    plotG = False
+
+
+print ("open database %s" % db_path)
+rdb = RDB.RDB(db_path)
+db = rdb.db
+# get all reactions
+reactions = db(db.reactions).select()
+if "reaction_origin" in params:
+    reactions = reactions.find(lambda row: row.origin in params["reaction_origin"])
+
+print("Level of theory = ", params["lot"])
+lotID = rdb.get_lot(params["lot"])
+
+
+print("The ZPE correction factor = ", params["f_cor"])
+
+curjobids = []
+ncurjobs = 0
+jobids = []
+if view_reactions:
+    import pydot
+    import webbrowser
+    rgraph = pydot.Dot(graph_type="digraph")
+
+# Loop over the reactions
+'''
+path_ref_educts   : list   : the mfpx path of the educts from the start LOT
+path_ref_products : list   : the mfpx path of the products from the start LOT
+path_ref_ts       : string : the mfpx path of the TS from the start LOT
+path_ed_complex   : string : the mfpx path of the educt complex from MD for non-unimolecular rxns
+path_prod_complex : string : the mfpx path of the product complex from MD for non-unimolecular rxns
+'''
+for r in reactions:
+    skip = False
+    if r.id != 1:
+        # get all species for this reaction
+        reac2ts_spec = db((db.reac2spec.reactionsID == r) & (db.reac2spec.label ==  0)).select().first()
+        reac2educt_spec = db((db.reac2spec.reactionsID == r) & (db.reac2spec.label == -1)).select()
+        reac2prod_spec  = db((db.reac2spec.reactionsID == r) & (db.reac2spec.label ==  1)).select()
+        reac2spec = db((db.reac2spec.reactionsID == r)).select()
+        n_ed = len(reac2educt_spec)
+        n_prod = len(reac2prod_spec)
+        E_el_rxn   = 0.0
+        E_el_act_f = 0.0
+        E_el_act_r = 0.0
+        ZPE_rxn    = 0.0
+        ZPE_act_f  = 0.0
+        ZPE_act_r  = 0.0
+        if plotG:
+            G_rxn  = np.zeros(numT) 
+            H_rxn  = np.zeros(numT)
+            TS_rxn = np.zeros(numT)
+
+        if reac2educt_spec.first() == None:
+            if verbose:
+                print("The reaction %d is not in the reac2spec table. Skipping..." %r.id)
+            continue
+
+        to_print = "============================================\n"
+        if r.origin == None:
+            title = "Reaction %d" %r.id
+        else:
+            title = "Reaction %d from reaction origin %d" %(r.id, r.origin)
+
+        to_print += title + ":\n"
+        to_print += "--------------------------------------------\n"
+
+        # EDUCTS
+        path_ref_educts = []
+        lnQ_educts = []
+        to_print += "                 EDUCTS                     \n--------------------------------------------\n"
+        for i,ed in enumerate(reac2educt_spec):
+            if reac2ts_spec != None and reac2ts_spec.speciesID == ed.speciesID:
+                if verbose:
+                    print("Educt and TS species are the same. This cannot be true. Skipping the reaction %d." %r.id)
+                skip = True
+            oed = db((db.opt_species.speciesID == ed.speciesID) & (db.opt_species.lotID == lotID)).select().first()
+            if oed == None:
+                if verbose:
+                    print("The educt species %d is not optimized with %s according to the database entries!" %(ed.speciesID,params["lot"]))
+                    print("Skipping the reaction %d ..." %r.id)
+                skip = True
+                break
+
+            to_print += "%d:\nspecID = %d;\nospecID = %d;\n" %(i+1,ed.speciesID, oed.id)
+            to_print += oed.info + "\n"
+            to_print += "E(%s) = %f H;\n" %(params["lot"],oed.energy)
+            if level3:
+                if not lot_CC in oed.info:
+                    if verbose:
+                        print("The energy of the structure at the level of theory %s is not calculated." %lot_CC)
+                        print("Skipping the reaction %d ..." %r.id)
+                    skip = True
+                    break
+            CC_energy = 0.0
+            ZPE = 0.0
+            for info in oed.info.split(";"):
+                if "ZPE" in info:
+                    if not only_SPE:
+                        ZPE = float(info.split("=")[-1])
+                if "M" in info:
+                    M = float(info.split("=")[-1])
+                    m_s = (M-1)/2
+                if level3:
+                    if lot_CC in info:
+                        CC_energy = float(info.split("=")[-1])
+            to_print += "m_s = %.1f\n" %m_s
+
+            if view_reactions:
+                path = os.path.join(db_path,oed.path)
+                fimg = get_fimg(path, with_sd, make_png)
+                if fimg == "":
+                    if verbose:
+                        print("No image file exists.")
+                else:
+                    new_node = pydot.Node(ed.speciesID,
+                                          image = fimg,
+                                          label = "spec.id=%s, ospec.id=%s, r.id=%d\n m_s=%.1f" %(ed.speciesID,oed.id,r.id,m_s),
+                                          labelloc = "b",
+                                          height = 2.5,
+                                          width = 2.5,
+                                          imagescale = False,
+                                          shape = "box")
+                    rgraph.add_node(new_node)
+
+            ZPE_rxn   -= params["f_cor"]*ZPE
+            ZPE_act_f -= params["f_cor"]*ZPE
+
+            oed_path = os.path.join(db_path,oed.path)
+            HT_oed = refine_qm_turbomole.Harvest(oed_path)
+
+            if level3:
+                E_el_rxn   -= CC_energy
+                E_el_act_f -= CC_energy
+                lnQ_ed, T = HT_oed.thermodynamics(f_cor=params["f_cor"], Tstart=Tstart, Tend=Tend, numT=numT, P=P)
+                lnQ_educts.append(lnQ_ed)
+            else:
+                if plotG:
+                     lnQ, T, G, S, H = HT_oed.thermodynamics(f_cor=params["f_cor"], Tstart=Tstart, Tend=Tend, numT=numT, P=P, getGSH = True)
+                     G_rxn  -= G
+                     H_rxn  -= H
+                     TS_rxn -= T*S  
+                E_el_rxn   -= oed.energy
+                E_el_act_f -= oed.energy
+
+        if skip: continue
+
+        # PRODUCTS
+        path_ref_products = []
+        lnQ_products = []
+        to_print += "--------------------------------------------\n                   PRODUCTS                 \n--------------------------------------------\n"
+        for i,prod in enumerate(reac2prod_spec):
+            if reac2ts_spec != None and reac2ts_spec.speciesID == prod.speciesID:
+                if verbose:
+                   print("Product and TS species are the same. This cannot be true. Skipping the reaction %d." %r.id)
+                skip = True
+            oprod = db((db.opt_species.speciesID == prod.speciesID) & (db.opt_species.lotID == lotID)).select().first()
+            if oprod == None:
+                if verbose:
+                    print("The product species %d is not optimized with %s according to the database entries!" %(prod.speciesID,params["lot"]))
+                    print("Skipping the reaction %d ..." %r.id)
+                skip = True
+                break
+            to_print += "%d:\nspecID = %d;\nospecID = %d;\n" %(i+1,prod.speciesID, oprod.id)
+            to_print += oprod.info + "\n"
+            to_print += "E(%s) = %f H;\n" %(params["lot"],oprod.energy)
+            if level3:
+                if not lot_CC in oprod.info:
+                    if verbose:
+                        print("The energy of the structure at the level of theory %s is not calculated." %lot_CC)
+                        print("Skipping the reaction %d ..." %r.id)
+                    skip = True
+                    break
+            ZPE = 0.0
+            for info in oprod.info.split(";"):
+                if "ZPE" in info:
+                    if not only_SPE:
+                        ZPE = float(info.split("=")[-1])
+                if "M" in info:                
+                    M = float(info.split("=")[-1])
+                    m_s = (M-1)/2
+                if level3:
+                    if lot_CC in info:
+                        CC_energy = float(info.split("=")[-1])
+            to_print += "m_s = %.1f\n" %m_s
+            if view_reactions:
+                path = os.path.join(db_path,oprod.path)
+                fimg = get_fimg(path, with_sd, make_png)
+                if fimg == "":
+                    if verbose:
+                        print("No image file exists.")
+                else:
+                    new_node = pydot.Node(prod.speciesID,
+                                          image = fimg,
+                                          label = "spec.id=%s, ospec.id=%s, r.id=%d\nm_s=%.1f" %(prod.speciesID,oprod.id,r.id,m_s),
+                                          labelloc = "b",
+                                          height = 2.5,
+                                          width = 2.5,
+                                          imagescale = False,
+                                          shape = "box")
+                    rgraph.add_node(new_node)
+
+
+            ZPE_rxn  += params["f_cor"]*ZPE
+            ZPE_act_r -= params["f_cor"]*ZPE
+            oprod_path = os.path.join(db_path,oprod.path)
+            HT_oprod = refine_qm_turbomole.Harvest(oprod_path)
+
+            if level3:
+                E_el_rxn   += CC_energy
+                E_el_act_r -= CC_energy
+                lnQ_prod, T = HT_oprod.thermodynamics(f_cor=params["f_cor"],Tstart=Tstart, Tend=Tend, numT=numT, P=P)
+                lnQ_products.append(lnQ_prod)
+            else:
+                if plotG:
+                     lnQ, T, G, S, H = HT_oprod.thermodynamics(f_cor=params["f_cor"], Tstart=Tstart, Tend=Tend, numT=numT, P=P, getGSH = True)
+                     G_rxn  += G
+                     H_rxn  += H
+                     TS_rxn += T*S
+                E_el_rxn += oprod.energy
+                E_el_act_r -= oprod.energy
+
+        to_print += "--------------------------------------------\n"
+        to_print += "E_el_rxn = %.1f kJ/mol\n" %((E_el_rxn)/kjmol)
+        to_print += "E_rxn = %.1f kJ/mol\n" %((E_el_rxn+ZPE_rxn)/kjmol)
+        to_print += "--------------------------------------------\n"
+
+        if skip: continue
+
+        print(to_print)
+
+        to_print_ts = ""
+        # TRANSITION STATE
+        if reac2ts_spec != None:
+            to_print_ts += "--------------------------------------------\n                     TS                    \n--------------------------------------------\n" 
+            ots =  db((db.opt_species.speciesID == reac2ts_spec.speciesID) & (db.opt_species.lotID == lotID)).select().first()
+            if ots == None:
+                if verbose:
+                    print("The transition state species %d is not optimized with %s according to the database entries!" %(reac2ts_spec.speciesID,params["lot"]))
+                    print("Skipping the reaction %d ..." %r.id)
+                continue
+            
+            to_print_ts += "specID = %d;\nospecID = %d;\n" %(reac2ts_spec.speciesID, ots.id)
+            to_print_ts += ots.info + "\n"
+            to_print_ts += "E(%s) = %f H;\n" %(params["lot"],ots.energy)
+            if level3:
+                if not lot_CC in ots.info:
+                    if verbose:
+                        print("The energy of the structure at the level of theory %s is not calculated." %lot_CC)
+                        print("Skipping the reaction %d ..." %r.id)
+                    continue
+ 
+            ZPE = 0.0
+            for info in ots.info.split(";"):
+                if "ZPE" in info:
+                    if not only_SPE:
+                        ZPE = float(info.split("=")[-1])
+                if "M" in info:
+                    M = float(info.split("=")[-1])
+                    m_s = (M-1)/2
+                if level3:
+                    if lot_CC in info:
+                        CC_energy = float(info.split("=")[-1])
+            to_print_ts += "m_s = %.1f\n" %m_s
+
+            ZPE_act_f +=  params["f_cor"]*ZPE
+            ZPE_act_r +=  params["f_cor"]*ZPE
+            if level3:
+                to_print_ts += "---------------RATE CONSTANTS---------------\n"
+                E_el_act_f += CC_energy
+                E_el_act_r += CC_energy
+                path = os.path.join(db_path,ots.path)
+                OT = refine_qm_turbomole.OptimizationTools(path, verbose = verbose)
+                HT = refine_qm_turbomole.Harvest(path, verbose = verbose)
+                # Rate constants from transition state theory
+                inum, imfreq = OT.check_imaginary_frequency()
+                lnQ_ts, T = HT.thermodynamics(f_cor=params["f_cor"], Tstart=Tstart, Tend=Tend, numT=numT, P=P)
+                to_print_ts += "--------------Forward reaction--------------\n"
+                # the forward rate constant
+                lnk_f, k_f_unit = HT.get_lnk(T, P, E_el_act_f/kjmol, imfreq[0], lnQ_educts, lnQ_ts)
+                to_print_ts += 'units of k: ' + k_f_unit + "\n"
+                lnA0, n0, E0 = HT.get_p0(E_el_act_f, lnk_f, T)
+                popt_f, pcov = HT.fitArr(lnk_f, T, lnA0, n0, E0, k_unit = k_f_unit, title=title, subtitle='forward reaction rate constant')
+                to_print_ts += 'Forward rxn : lnA = %5.2f, n = %5.4f, E = %8.2f\n' %(popt_f[0],popt_f[1],popt_f[2]) 
+                to_print_ts += "--------------Reverse reaction--------------\n"
+                # the reverse rate constant
+                lnk_r, k_r_unit = HT.get_lnk(T, P, E_el_act_r/kjmol, imfreq[0], lnQ_products, lnQ_ts)
+                to_print_ts += 'units of k: ' + k_r_unit + "\n"
+                lnA0, n0, E0 = HT.get_p0(E_el_act_r, lnk_r, T)
+                popt_r, pcov = HT.fitArr(lnk_r, T, lnA0, n0, E0, k_unit = k_r_unit, title=title, subtitle='reverse reaction rate constant')
+                to_print_ts += 'Reverse rxn : lnA = %5.2f, n = %5.4f, E = %8.2f\n' %(popt_r[0],popt_r[1],popt_r[2])
+            else:
+                E_el_act_f += ots.energy
+                E_el_act_r += ots.energy
+
+            to_print_ts += "--------------------------------------------\n"
+            to_print_ts += "E_el_act_f = %.1f kJ/mol\n" %(E_el_act_f/kjmol)
+            to_print_ts += "E_el_act_r = %.1f kJ/mol\n" %(E_el_act_r/kjmol)
+            to_print_ts += "--------------------------------------------\n"
+
+
+
+            print(to_print_ts)
+            print("--------------------------------------------")
+            print("E_act_f = %.1f kJ/mol, E_rxn = %.1f kJ/mol" %((E_el_act_f+ZPE_act_f)/kjmol, (E_el_rxn+ZPE_rxn)/kjmol))
+            print("E_act_r = %.1f kJ/mol" %((E_el_act_r+ZPE_act_r)/kjmol))
+            print("============================================\n")
+
+
+            if view_reactions:
+                path = os.path.join(db_path,ots.path)
+                fimg = get_fimg(path, with_sd, make_png)
+                if fimg == "":
+                    print("No image file exists.")
+                else:
+                    if r.source == "manual":
+                        color = "blue"
+                    else:
+                        color = "green"
+                    origin = r.origin
+                    if r.origin == None:
+                        origin = -1
+                    new_node = pydot.Node(reac2ts_spec.speciesID,
+                                          image = fimg,
+                                          label = "r.id=%d, r.origin=%d, m_s=%.1f \n E_act_f = %.1f kJ/mol, E_rxn = %.1f kJ/mol" %(r.id, origin, m_s, (E_el_act_f+ZPE_act_f)/kjmol, (E_el_rxn+ZPE_rxn)/kjmol),
+                                          labelloc = "t",
+                                          height = 2.5,
+                                          width = 2.5,
+                                          imagescale = False,
+                                          shape = "box",
+                                          color = color)
+                    rgraph.add_node(new_node)
+                # Add the edges:
+                for prod in reac2prod_spec:
+                    rgraph.add_edge(pydot.Edge(reac2ts_spec.speciesID, prod.speciesID, label = "r.%d" %r.id))
+                for ed in reac2educt_spec:
+                    rgraph.add_edge(pydot.Edge(ed.speciesID,reac2ts_spec.speciesID, label = "r.%d" %r.id))
+
+        else:
+            print(to_print)
+            print("Barrierless reaction:")
+            print("--------------------------------------------")
+            print("E_rxn = %.1f kJ/mol" %((E_el_rxn+ZPE_rxn)/kjmol))
+            print("============================================\n")
+            if view_reactions:
+                new_node = pydot.Node("r.%d" %r.id, label="barrierless r.%d\n E_rxn = %.1f kJ/mol" %(r.id, (E_el_rxn+ZPE_rxn)/kjmol))
+                rgraph.add_node(new_node)
+                # Add the edges:
+                for prod in reac2prod_spec:
+                    rgraph.add_edge(pydot.Edge("r.%d" %r.id, prod.speciesID, label = "r.%d" %r.id))
+                for ed in reac2educt_spec:
+                    rgraph.add_edge(pydot.Edge(ed.speciesID, "r.%d" %r.id, label = "r.%d" %r.id))
+
+        if plotG:
+            import matplotlib.pyplot as plt
+            plt.style.use('ggplot')
+            fig, ax = plt.subplots()
+            fig.set_size_inches(4,4)
+            #plt.xlim(Tstart, Tend)
+            plt.xlim(Tstart,2000)
+            plt.minorticks_on()
+            ax.plot(T, H_rxn/1000,  label = r"$\Delta$H")
+            ax.plot(T, TS_rxn/1000, label = r"$T\Delta$S")
+            ax.plot(T, G_rxn/1000,  label = r"$\Delta$G")
+            ax.set_xlabel('Temperature (K)')
+            ax.set_title("Reaction energy in kJ/mol")
+            ax.legend()
+            fig.savefig('r%d.png' %r.id, dpi=500)
+
+if view_reactions:
+    print(rgraph)
+#    rgraph = pydot.graph_from_dot_data(rgraph)
+    rgraph.write_svg("rgraph_lot%d.svg" %lotID)
+    rgraph.write_png("rgraph_lot%d.png" %lotID)
+    webbrowser.get(browser).open_new("rgraph_lot%d.svg" %lotID)
+

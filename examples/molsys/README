@@ -1,0 +1,9 @@
+This directory contains examples to use molsys.
+
+These examples are mostly commented scripts for tasks that might serve as a test at a later stage
+or explain some features. Since it is often faster to provide such an example than writing
+documentation, consider them as an inspiration and as a beta docu.
+
+Example providers: Put sufficient comments into your script and add a little readme
+
+

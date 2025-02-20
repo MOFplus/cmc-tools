@@ -1,0 +1,19 @@
+# files
+*.pyo
+*.pyc
+*.log
+*.so
+*.o
+*.swp
+*.arc
+*.jar
+# folders
+doc/_build/*
+.cache/
+.hypothesis/
+__pycache__/
+.pytest_cache/
+.vscode/
+*_run/
+run/
+

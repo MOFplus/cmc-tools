@@ -1,0 +1,839 @@
+#! /usr/bin/env python3
+
+#
+#          MFP5 
+#
+#   interactive mfp5 file analysis
+#   written out of a need by RS (2014)
+
+#   2019: converted to python3 and extended for the analysis of ReaxFF mfp5 files
+#   2021: renamed from pdlp to mfp5
+#
+
+import numpy as np
+import string
+import os
+import shutil
+import subprocess
+from molsys.util import mfp5io
+import types
+import time
+import copy
+try:
+    import matplotlib.pyplot as plt
+except:
+    print("Matplot lib is missing!")
+else:
+    pass
+from molsys.util import  tralyzer2
+
+# this is a dictionary to hold the tempraray arrays used in the trajectory analysis
+tral_arrays= {} 
+
+mem_limit = 500*2**20 # 500 MB
+
+############### helper functions and classes ##############################
+
+def grab_input(opts, quest, default=None, optlen=1):
+    print("")
+    if type(opts) == dict:
+        optlist = list(opts.keys())
+        optlist.sort()
+        for o in optlist:
+            print(((" %%%ds - %%s" % optlen) % (o, opts[o])))
+    elif type(opts) == list:
+        optlist = list(map(str, list(range(1,len(opts)+1))))
+        for i, op in enumerate(opts):
+            print((" %1d - %s" % (i+1, opts[i])))
+        if default:
+            default = str(opts.index(default)+1)
+    else:
+        raise ValueError("Illegal options type for grab_input")
+    inp = None
+    questout = quest
+    if default: questout += (" [%s]" % default)
+    while inp not in optlist:
+        inp = input("%s \n>> " % questout)
+        if default:
+            if inp == "": inp = default
+    return inp
+
+def toggle_input(opts):
+    opts = copy.copy(opts)
+    opts.append("quit")
+    goon = True
+    while goon:
+        res = grab_input(opts, "Toggle options (*: on)")
+        i = int(res)-1
+        if i == len(opts)-1:
+            goon = False
+        else:
+            if opts[i][-1] == "*":
+                opts[i] = opts[i][:-2]
+            else:
+                opts[i] += " *"
+    finalopts = []
+    for o in opts:
+        if o[-1] == "*" : finalopts.append(o[:-2])
+    return finalopts
+    
+class fake_ffe:
+
+    def __init__(self, mol):
+        self.mol = mol
+
+    def get_xyz(self):
+        return self.mol.get_xyz()
+
+    def get_cell(self):
+        return self.mol.get_cell()
+    
+
+
+
+############### parse input options #######################################
+# to be done ...
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("mfp5-file")
+args = vars(parser.parse_args())
+
+############### helper functions ##########################################
+
+def write_xyz(f, elems, xyz):
+    f.write("%5d\n\n" % len(elems))
+    for i, e in enumerate(elems):
+        f.write("%2s %8.4f %8.4f %8.4f\n" % tuple([e]+xyz[i].tolist()))
+    return
+    
+def launch_molden(filename):
+    print("calling: molden %s" % filename)
+    ret = subprocess.call(["molden", filename])
+    return
+
+def launch_vmd(filename):
+    print("calling: vmd %s" % filename)
+    ret = subprocess.call(["vmd", filename])
+    return
+
+###############  main code ################################################
+
+print("******************************************************************")
+print("")
+print("          MFP5 file viewer and analyser") 
+print("            R. Schmid, J. Keupp, RUB, 2014-2020")
+print("")
+print("******************************************************************")
+
+mfp5f = args["mfp5-file"]
+if os.path.isfile(mfp5f):
+    print(("\nOpening mfp5 file %s" % mfp5f))
+    pdiof = mfp5io.mfp5io(mfp5f)
+else:
+    raise IOError("mfp5 file does not exist")
+
+scrdir = "mfp5_" + str(os.getpid())
+try:
+    os.mkdir(scrdir)
+    print(("using %s as scratchdir (will be removed on exit by default)" % scrdir))
+except IOError:
+    print("to be implemented")
+    
+########### report content of mfp5 file ###################################
+
+print("\nReading and processing system info from file!")
+mol = pdiof.get_mol_from_system()
+elems = mol.get_elems()
+atypes = mol.get_atypes()
+bcd = mol.get_bcond()
+natoms = mol.get_natoms()
+cnct = mol.get_conn()
+# NOTE: this should be available meanwhile!! test ist
+# TBI: currently we do not have this info in mfp5io files ... need to fix this
+# whichmol, moltypes, molnames  = pdiof.get_molecules()
+# nmols = len(moltypes)
+# mols = []
+# for i in range(nmols) : mols.append([])
+# for i, m in enumerate(whichmol): mols[m].append(i)
+stages                        = pdiof.get_stages()
+
+print ("\nReporting mfp5 file content:")
+print(("Number of Atoms:     %d" % natoms))
+# print(("Number of Molecules: %d" % len(moltypes)))
+print(("Boundary condition:  %d" % bcd))
+
+########### Main loop #####################################################
+
+cur_stage = "default"
+stop = False
+while not stop:
+
+    print("\n******************************************************************") 
+    print ("The following stages are available:")
+    for i,s in enumerate(stages):
+        flag = ""
+        stage_group = pdiof.h5file[s]
+        traj = ""
+        tdata = None
+        if "traj" in list(stage_group.keys()):
+            tdata = list(stage_group["traj"].keys())
+            traj = "traj data: "
+            for d in tdata: traj += " "+d
+        if s == cur_stage:
+            flag = "<current>"
+            cur_stage_group = stage_group
+            cur_tdata       = tdata
+        print(("%2d - %-10s %-10s %s" % (i+1, s, flag, traj)))
+    
+    print ("Further options:")
+    print (" m - inspect and modify molecules")
+    print (" c - copy data to a new or existing mfp5 file")
+    print (" v - visualize restart geometry")
+    print (" t - visualize the trajectory (or parts)")
+    print (" p - plot thermodynamic data")
+    print (" a - analysis by using TRALYZER2")
+    print (" x - analysis by using the external TRAVIS code (must be installed)")
+    print (" q - quit")
+
+    print ("\nWARNING: this script is under development for the conversion to molsys/mfp5io and python3")
+    print   ("         a lot of these methods might not work, yet!!!")
+
+    opts = ["m", "q", "v", "c", "p", "t", "a", "x"] + list(map(str, list(range(1,len(stages)+1))))
+    inp = None 
+    while not inp in opts:
+        inp = input("\nChoose stage or other option form the list above\n>> ")
+    
+    if   inp == "m":
+        ############### start molecules inputloop here ###################################
+        molstop = False
+        while not molstop:
+            print("\n******************************************************************")
+            print("MOLECULES submenu")
+            print("There are %d molecules in the system" % nmols)
+            print("Types of molecules: %d" % len(molnames))
+            print((len(molnames)*"%s, ") % tuple(molnames))
+            print()
+            print (" d - Show details of molecules")
+            print (" r - rename")
+            print (" q - quit")
+            molopts = ["d", "q", "r"]
+            molinp  = None
+            while not molinp in molopts:
+                molinp = input("\nChoose option\n>> ")
+            
+            if molinp == "q":
+                molstop = True
+            elif molinp == "d":
+                # collect atomtype info
+                mol_atypes = []
+                for i in range(nmols):
+                    ma = []
+                    m = mols[i]
+                    for j in range(len(m)):
+                        at = atypes[m[j]]
+                        if not at in ma: ma.append(at)
+                    mol_atypes.append(ma)
+                for i in range(nmols):
+                    at_string = (len(mol_atypes[i])*"%s ") % tuple(mol_atypes[i])
+                    print(("mol %3d : %15s %5d atoms, (%s)" % (i+1, molnames[moltypes[i]], len(mols[i]), at_string)))
+                print()
+            elif molinp == "r":
+                mi = []
+                answ = input("\nSelect by index (i) or by atomtypes (t)? [i/t]\n>> ")
+                if answ == "i":
+                    molindex_raw = input("\nPlease enter comma separated indices, ranges with '-' (example: 1,3,5,10-12)\n>> ")
+                    molindex = string.split(molindex_raw, ",")
+                    for m in molindex:
+                        if "-" in m:
+                            mr = string.split(m, "-")
+                            mi += list(range(int(mr[0])-1, int(mr[1])))
+                        else:
+                            mi.append(int(m)-1)
+                elif answ == "t":
+                    print("not implemented yet")
+                else:
+                    print("You entered the unknown option %s! Aborting!" % answ)
+                newname = input("\nPlease enter new molecule name (max. 10 characters, no whitespace)\n>> ")
+                newname = string.split(newname)[0][:10]
+                print("The molecules will be renamed to %s" % newname)
+                # test if this molname already exists
+                if not newname in molnames:
+                    molnames.append(newname)
+                molname_ind = molnames.index(newname)
+                for i in mi:
+                    moltypes[i] = molname_ind
+                pdiof.set_molecules(np.array(whichmol, "i"), np.array(moltypes, "i"), molnames)
+            else:
+                print("This should never happen!")
+        ############### end of molecules inputloop here #########################################
+
+                
+    elif inp == "c":
+        ############### start copy data here                  ###################################
+        print("\n******************************************************************")
+        print("COPY Data ")
+        finp = input("\nEnter the filename to which data should be copied (if it does not exist it will be generated)\n>> ")
+        fffe = fake_ffe(mol) 
+        pdiof2 = mfp5io.mfp5io(finp, ffe=fffe)
+        if pdiof2.fexists == False:
+            # this is a new and empty mfp5 file .. we need to populate the default stage
+            print("\nA new mfp5 file has been created")
+            print("Please choose from which stage the default restart data should be taken from")
+            print("Available stages: %s" % ", ".join(pdiof.get_stages()))
+            from_stage = None
+            while not ((from_stage in pdiof.get_stages()) or (from_stage == "")):
+                from_stage = input("stage [default]>> ")
+            if from_stage == "": 
+                from_stage = "default"
+            print ("Writing system data to new file")
+            pdiof2.write_system()
+            # TBI .. molecules in mfp5 file .. still needed
+            # print ("Writing molecules to new file")
+            # pdiof2.set_molecules(whichmol, moltypes, molnames)
+            pdiof2.add_stage("default")
+            from_stage = pdiof.h5file[from_stage]["restart"]
+            to_stage   = pdiof2.h5file["default"]["restart"]
+            for d in list(from_stage.keys()):
+                to_stage.require_dataset(d, shape = from_stage[d].shape, dtype = "float64")
+                to_stage[d][...] = from_stage[d]
+        else:
+            # this is an existing pdlp file and the system group is initalized already
+            # check consistency first
+            #print pdiof2.h5file["system/elems"]
+            #print pdiof.h5file["system/elems"]
+            #if pdiof2.h5file["system/elems"] != pdiof.h5file["system/elems"]:
+            #    raise IOError, "The systems of the pdlp files do not correspond!"
+            print("WARNING: We currently do not test if the systems of the two mfp5 files match! You should know ;-)")
+            print("Please choose which stage should be copied to the new file")
+            print("Available stages: %s" % ", ".join(pdiof.get_stages()))
+            from_stage = None
+            while not (from_stage in pdiof.get_stages()): from_stage = input("stage name? >> ")
+            print("Please enter the name of the new stage in the target pdlp file")
+            print("Existing stages: %s" % ", ".join(pdiof2.get_stages()))
+            to_stage = input("stage name? [%s] >> " % from_stage)
+            if to_stage == "": to_stage = from_stage
+            doit = True
+            if to_stage in pdiof2.get_stages():
+                print("You have chosen an existing stage in the target file")
+                inp = None
+                while not (inp=="y" or inp=="n"):
+                    inp = input("Are you sure that you want to overwrite the data? [y/n] ")
+                if inp=="n": doit=False
+            else:
+                print("Generating new stage")
+                pdiof2.add_stage(to_stage, 10)
+            if doit:
+                print("copying the restart group")
+                from_stage = pdiof.h5file[from_stage]
+                to_stage   = pdiof2.h5file[to_stage]
+                for d in list(from_stage["restart"].keys()):
+                    to_stage["restart"].require_dataset(d, shape = from_stage["restart"][d].shape, dtype = "float64")
+                    to_stage["restart"][d][...] = from_stage["restart"][d]
+                if "traj" in list(from_stage.keys()):
+                    tdata = list(from_stage["traj"].keys())
+                    print("\nPlease choose which data to be copied from the trajectory section")
+                    tdata.append("quit")
+                    goon = True
+                    while goon:
+                        res = grab_input(tdata, "Toggle state of dataset (*: to be copied)")
+                        i = int(res)-1
+                        if i == len(tdata)-1:
+                            goon = False
+                        else:
+                            if tdata[i][-1] == "*":
+                                tdata[i] = tdata[i][:-2]
+                            else:
+                                tdata[i] += " *"
+                    tcopy = []
+                    for t in tdata:
+                        if t[-1] == "*" : tcopy.append(t[:-2])
+                    if len(tcopy) > 0:
+                        to_stage.require_group("traj")
+                        for d in tcopy:
+                            print("copy of dataset %s in progress" % d)
+                            from_dset = from_stage["traj"][d]
+                            to_stage["traj"].require_dataset(d, shape= from_dset.shape, dtype=from_dset.dtype)
+                            # we need to check the size of the data for the copy process
+                            nframes = from_dset.shape[0]
+                            mem_per_frame = np.array(from_dset.shape[1:]).prod()*from_dset.dtype.itemsize
+                            print("Memory per frame %10.3f MB" % (mem_per_frame/float(2**20)))
+                            to_dset = to_stage["traj"][d]
+                            if nframes*mem_per_frame>mem_limit:
+                                # copy in chunks
+                                maxframe = mem_limit/mem_per_frame
+                                print("Copying in chunks of %d frames (%10.3f MB)" % (maxframe,maxframe*mem_per_frame/float(2**20))) 
+                                for i in range(0,nframes, maxframe):
+                                    if i+maxframe<nframes:
+                                        print("Copy frame %8d to %8d" % (i, i+maxframe-1))
+                                        to_dset[i:i+maxframe,...] = from_dset[i:i+maxframe,...]
+                                    else:
+                                        print("Copy frame %8d to %8d" % (i, nframes-1))
+                                        to_dset[i:,...] = from_dset[i:,...]                                        
+                            else:
+                                #copy in one block
+                                to_dset[...] = from_dset
+                        # copy attributes
+                        attrib = from_stage["traj"].attrs
+                        for k in list(attrib.keys()):
+                            to_stage["traj"].attrs[k] = attrib[k]
+                    else:
+                        print("Nothing chosen to be copied")
+                    print("Copy done!\n")
+        pdiof2.close()
+        ############### end of copy data here                ###################################
+
+    ############### start plotting  here                     ###################################
+    elif (inp == "p"):
+        if "thermo" in cur_tdata:
+            print("\n******************************************************************")
+            print("Plotting Thermodynmic Data of stage %s" % cur_stage)
+            data = pdiof.h5file[cur_stage]["traj"]["thermo"]
+            labels = data.attrs["labels"].split()
+            print("The follwoing lables can be plotted:")
+            print(" ".join(labels[1:]))
+            inp = input("\nType all labels you want to plot (separated by a whitespace)\n>>")
+            inpl = inp.split()
+            toplot = []
+            for i in inpl:
+                if i in labels:
+                    toplot.append((i, labels.index(i)))
+            if len(toplot) > 0:
+                print ("\nPlotted Thermodata:")
+                print (  "===================\n")
+                fig, axs = plt.subplots(len(toplot))
+                for i, elem in enumerate(toplot):
+                    name = elem[0]
+                    ind = elem[1]
+                    # fit a trendline
+                    (m, b), (SSE,), *_ = np.polyfit(data[:,0], data[:,ind], deg=1, full=True)
+                    axs[i].plot(data[:,0], data[:,ind], label = r"$\rm %s$" % name)
+                    axs[i].plot(data[:,0], m*data[:,0]+b, color="r", label = "linear trend")
+                    axs[i].set_xlabel('step')
+                    axs[i].set_ylabel(labels[ind])
+                    axs[i].legend()
+                    # do some block averaging
+                    n = data.shape[0]
+                    berror = [] 
+                    for bsize in (1, 2, 4, 8, 16, 32):
+                        nb = int(n/bsize)
+                        bdata = np.reshape(data[:nb*bsize, ind], (nb, bsize))
+                        bavrg = bdata.sum(axis=1)/bsize
+                        berror.append(np.std(bavrg, ddof=1) / np.sqrt(nb))
+                    # print some important data
+                    avrg = np.mean(data[:,ind])
+                    print ("%-10s: avrg %10.5f slope %10.5f" % (labels[ind], avrg, m))
+                    print ("    block errors %s" % berror)
+                plt.tight_layout()
+                plt.show()
+        else:
+            print("No thermodynmic data in this stage")
+    ############### end plotting  here                     ###################################
+
+    elif (inp == "a"):
+        ############### start analysis here                  ###################################
+        if cur_tdata:
+            print("\n******************************************************************")
+            print("Data analysis")
+            inp = input ("If you do NOT want to use the stored timestep (or the default 0.001ps)\nplease enter the timestep\n>> ")
+            if inp != "":
+                tstep = float(inp)
+            else:
+                tstep = None
+            tral2 = tralyzer2.tralyzer2(pdiof, cur_stage, tstep=tstep)
+            molnames = tral2.molnames
+            opts = {"com"   : "compute center of mass of a molecular species",\
+                    "cav"   : "compute average cell params",\
+                    "ela"   : "compute elastic constants from strain fluctuation" , \
+                    "cld"   : "load a com of a molecular species from the mfp5 file",\
+                    "m3d"   : "Generate a 3D map from a COM like object and write as CUBE file",\
+                    "map"   : "Map a COM like object in arbitrary dimensions",\
+                    "msd"   : "Compute Mean Square Displacement from COM [COM has to be computed before running 'msd']",\
+                    "rot"   : "Compute rotational Autocorrelation function  of a molecular species",\
+                    "dip"   : "Dipole calculation [only rigid molecules]",\
+                    "avq"   : "Average charge for atomtype",\
+                    "lmz"   : "Location of a target molecule along the z-axis over time",\
+                    "snp"   : "Snips clusters centered around a specific atomtype from the trajectory",\
+                    "ahp"   : "Average instantaneous hydrostatic pressure",\
+		            "pol"   : "Calculates the dielectric constant of the system",\
+                    "eps"   : "Calculates the dielectric constant from precalculated system dipole",\
+                    "fld"   : "Dielectric Constant calculation with applied external field",\
+                    "plt"   : "Plot scalar dataset",\
+                    "x"     : "exit" }
+            astop = False
+            while not astop:
+                inp = grab_input(opts, "\nPlease enter the type of analysis to be performed", optlen=3)
+                if inp == "com":
+                    mol = grab_input(molnames, "Choose the molecule type")
+                    mol = molnames[int(mol)-1]
+                    inpstore = input("Do you want to store the com array in the mfp5 file? [N/y]\n>> ")
+                    if inpstore == "y":
+                        store = True
+                    else:
+                        store = False
+                    print("\nTRALYZER: computing com")
+                    print("\n         depending on the size of the system this can take a while")
+                    com = tral2.compute_com(mol, store=store)
+                    print("\n Done!")
+                    arraystore = False
+                    while not arraystore: 
+                        arraystore = input("Enter the name under which you want to store this array in memory\n>> ")
+                        if arraystore in list(tral_arrays.keys()):
+                            print("This array name already exists!")
+                            arraystore = False
+                    if arraystore != "":
+                        tral_arrays[arraystore] = com
+                elif inp == "cld":
+                    mol = grab_input(molnames, "Choose molecule type")
+                    mol = molnames[int(mol)-1]
+                    com = tral2.load_com(mol)
+                    if com != None:
+                        arraystore = False
+                        while not arraystore: 
+                            arraystore = input("Enter the name under which you want to store this array in memory\n>> ")
+                            if arraystore in list(tral_arrays.keys()):
+                                print("This array name already exists!")
+                                arraystore = False
+                        if arraystore != "":
+                            tral_arrays[arraystore] = com
+                    else:
+                        print("No COM data for this molecule stored in the file")
+                elif inp == "cav":
+                    first = input("First frame [0] ")
+                    if first == "": first = "0"
+                    first = int(first)
+                    last = input("Last frame [-1] ")
+                    if last == "": last = "-1"
+                    last = int(last)
+                    fname = input("Enter name of file to write cell params for plotting\n[No file is written if omitted] >>")
+                    if fname == "": fname = None
+                    print("\nTRALYZER: Computing cell averages")
+                    tral2.get_cell_averages(first, last, write_frames=fname)
+                elif inp == "ela":
+                    first = input("First frame [0] ")
+                    if first == "": first = "0"
+                    first = int(first)
+                    last = input("Last frame [] ")
+                    if last == "": 
+                        last = None
+                    else:
+                        last = int(last)
+                    temp = ""
+                    while temp == "":
+                        temp = input("Enter the Temperature in K to be used for the analysis ")
+                    temp = float(temp)
+                    print("\nTRALYZER: Computing elastic constants from strain fluctuation")
+                    tral2.compute_elastic_constants(temp, first, last)
+                elif inp == "m3d":
+                    print ("\n 3D MAP -> generate a cube file with the 3D probability distribution")
+                    tarlist = list(tral_arrays.keys())
+                    icom = int(grab_input(tarlist, "Choose the COM object to analyse"))-1
+                    com = tral_arrays[tarlist[icom]]
+                    nfr = com.shape[0]
+                    ncm = com.shape[1]
+                    if com.shape[2] != 3:
+                        raise ValueError("This is not a COM like object")
+                    first = input("First frame [0] ")
+                    if first == "": first = "0"
+                    first = int(first)
+                    last = input("Last frame [-1] ")
+                    if last == "": last = "-1"
+                    last = int(last)
+                    if last > nfr:
+                        print("You entered a too large frame number .. reducing to maximum available of %d frames" % nfr)
+                        last = nfr
+                    inpok = False
+                    while not inpok:
+                        inp = input("Enter the grid size (either a single number (NX=Ny=Ny) or 'Nx Ny Nz')\n>> ")
+                        linp = inp.split()
+                        if len(linp) == 1:
+                            N = int(linp[0])
+                            if N > 0:
+                                N *= 3
+                                inpok = True
+                        else:
+                            if len(linp) == 3:
+                                N = list(map(int, linp))
+                                inpok = True
+                    m3d = tral2.map3D_com(com[first:last], N)
+                    fname = input("\nEnter the filename of the cube file (.cube will be appended)\n>> ")
+                    istage = grab_input(stages, "From which stage should we get the molecular structure info?", default=cur_stage)
+                    stage = stages[int(istage)-1]
+                    viewmols = toggle_input(molnames)
+                    tral2.write_map_as_cube(m3d, fname, stage, viewmols)
+                elif inp == "map":
+                    print ("\nPreparing Maps in arbitrary dimensions")
+                    tarlist = list(tral_arrays.keys())
+                    icom = int(grab_input(tarlist, "Choose the COM object to analyse"))-1
+                    com = tral_arrays[tarlist[icom]]
+                    nfr = com.shape[0]
+                    ncm = com.shape[1]
+                    if com.shape[2] != 3:
+                        raise ValueError("This is not a COM like object")
+                    first = input("First frame [0] ")
+                    if first == "": first = "0"
+                    first = int(first)
+                    last = input("Last frame [-1] ")
+                    if last == "": last = "-1"
+                    last = int(last)
+                    if last > nfr:
+                        print("You entered a too large frame number .. reducing to maximum available of %d frames" % nfr)
+                        last = nfr 
+                    indims = input("Please enter the dimensions you want to analyze (e.g. 'z' or 'xy')\n>> ")
+                    dims = []
+                    dlen = []
+                    for c in indims:
+                        if c in "xyz": dims.append(c)
+                        n = input("Please enter number of gridpoints along %1s\n>> " % c)
+                        dlen.append(int(n))
+                    mnd = tral2.map_com(com[first:last], dims, dlen)
+                    if len(dims) == 1:
+                        fname = input("Please enter filename (.dat will be appended) Warning: file will be overwritten\n>> ")
+                        np.savetxt(fname+".dat",mnd, fmt="%12.6f")
+                    else:
+                        print("not yet implemented .. please do so!!")
+                        
+                elif inp == "msd":
+                    print ("\n Available COM objects to calculate the MSD from:")
+                    tarlist = list(tral_arrays.keys())
+                    icom = int(grab_input(tarlist, "\nChoose the COM object to analyse"))-1
+                    com = tral_arrays[tarlist[icom]]
+                    nfr = com.shape[0]
+                    ncm = com.shape[1]
+                    if com.shape[2] != 3:
+                        raise ValueError("This is not a COM like object")
+                    msd = tral2.com_msd(com, tarlist[icom], store = False)
+                    filename = input("Please enter a filename (.dat will be appended) Warning: file will be overwritten\n>> ")
+                    tral2.write_msd(msd, filename+".dat")
+                    incalc = False
+                    while not incalc:
+                        inp = input("Calculate the diffusion coefficient? [y/n]\n>>")
+                        if inp == "y":
+                            firstframe = int(input("Please enter the first frame:\n>>>"))
+                            lastframe = int(input("Please enter the last frame:\n>>>"))
+                            diffc = tral2.calc_diffc(msd, firstframe, lastframe)
+                            print("\nThe diffusion coefficient is %.4fE-9 m^2/s\n" % (diffc))
+                            incalc = True
+                        else:
+                            print("\n")
+                            incalc = True
+
+                elif inp == 'rot':
+                    whichmol, moltypes, molnames = pdlpio.pdlpio.get_molecules(pdiof)
+                    rot_molname = input("\nMolname of the target molecule? [as string] \n>>").lower()
+                    rot_atoms =  [int(i) for i in input("\nWhich atoms should be used? [blank separated integers] \n>>").split()]
+                    dt_max =   float( input("\nTime Window for autocorrelation calculation \n>>") )
+                    #tral2.compute_rotational_autocorrelation(rot_molname)
+                    orient = tral2.compute_orient(rot_molname,rot_atoms)
+                    ac = tral2.orient_autocor(orient,rot_molname,dt_max=dt_max)  #### dt_max in ps??
+                    tral2.get_relaxation_time(ac,ask=True)
+                    pass                
+                
+                elif inp == "dip":
+                    whichmol, moltypes, molnames = pdlpio.pdlpio.get_molecules(pdiof)
+                    for i in range(len(molnames)):
+                        print("%d %s" % (i+1,molnames[i]))
+                    dip_molname = input("\nMolname of the target molecule? [as string] \n>>").lower()
+                    store_input = input("Do you want to store the molecular diple information in the *.mfp5 file? [y/N]:\n>>>").lower()
+                    store = False
+                    if store_input == 'y':
+                        store = True
+                    print("Calculating dipole")
+                    dip_results = tral2.com_dipole(dip_molname, store)
+                    write_histo = input("Write histogram file for dipoles? [y/n] \n>>")
+                    if write_histo.lower() == "y":
+                        nbins = int(input("Please enter the amount of bins (more bins -> higher resolution [Integer]) \n>>>"))
+                        maxrange = float(input("Please enter the max range for the bins [Float] \n>>>"))
+                        tral2.histo_dip(dip_results, nbins, maxrange)
+                
+                elif inp == "avq":
+                    atmtype = input("Atomtype of target atoms? \n>>")
+                    saveq = input("Write charges to file? [y/N] \n>>").lower()
+                    writeq = False
+                    if saveq == "y":
+                        writeq = True
+                        filename = input("Please enter a filename \n>>>")
+                        nbins = int(input("Please enter the amount of bins \n>>>"))
+                        minrange = float(input("Please enter the min range \n>>>"))
+                        maxrange = float(input("Please enter the max range \n>>>"))
+                    print("Calculating average charge")
+                    if writeq:
+                        tral2.com_avg_charge(atmtype, writeq, filename, nbins, minrange, maxrange)
+                    else:
+                        tral2.com_avg_charge(atmtype, writeq)
+                
+                elif inp == "lmz":
+                    tarmol = int(input("Please enter the index of the molecule you want to track \n>>>"))
+                    tral2.track_mol_z(tarmol)
+                
+                elif inp == "snp":
+                    target = input("Please enter the atomtype around which you want to cut out the cluster:\n>>>")
+                    tarcut = float(input("Please enter the radius for the cutting process:\n>>>"))
+                    ntarget = int(input("How many clusters should be cut out per frame? [WARNING: Script currently writes a new output file for each cluster]:\n>>>"))
+                    shuffle = input("Should the clusters be randomly choosen from all possible clusters for each frame? [yes/no]:\n>>>")
+                    if shuffle.lower() == "yes":
+                        shuffle = True
+                    else:
+                        shuffle = False
+                    fullmol = input("Should the cutout only contain complete molecules? [yes/no]:\n>>>")
+                    if fullmol.lower() == "yes":
+                        fullmol = True
+                    else:
+                        fullmol = False
+                    tarframe= int(input("Choose the step width for the frames [every nth frame will be used]:\n>>>"))
+                    tral2.snip(target, tarcut, ntarget, shuffle, fullmol, tarframe)
+            
+                elif inp == "pol":
+                    temperature = float(input("Please enter the temperature of your simulation run in K:\n>>>"))
+                    store_input = input("Do you want to store the system diple vector for each frame in the *.mfp5 file? [y/N]:\n>>>").lower()
+                    store = False
+                    if store_input == 'y':
+                        store = True
+                    tral2.dielec(temperature,store)
+                    
+                elif inp == "eps":
+                    temperature = float(input("Please enter the temperature of your simulation run in K:\n>>>"))
+                    volume = (float(input("Please provide the box length of your cubic system in Angstrom:\n>>>")))**3
+                    tral2.dielec_precalc(temperature,volume)
+                
+                elif inp == "fld":
+                    field = float(input("Enter the applied field strength in V/Ang\n>>> "))
+                    tral2.fld(field)
+                
+                elif inp == "ahp":
+                    w = input("Write pressures into file? [yes/no]\n") + ' '
+                    fname = None
+                    if w[0].upper() == "Y":
+                        fname = input("Write file name: \n")
+                    tral2.compute_hydrostatic_pressure(fname)
+                    
+                elif inp == "plt":
+                    keys = tral2.get_keys()
+                    print("Available datasets:\n")
+                    for i in range(len(keys)):
+                        print("%d - %s" % (i, keys[i]))
+                    dataset = keys[int(input("\nPlease select the scalar dataset you want to plot:\n>>>"))]
+                    data = tral2.get_data(dataset)
+                    plt.plot(data)
+                    plt.ylabel(dataset)
+                    plt.show()
+                
+                elif inp == "x":
+                    astop = True
+                else:
+                    print("This should naver happen! .. but it did ... ;-{{{")
+            del(tral2)
+                    
+        else:
+            print("No trajectory data in this stage! Please choose another stage")
+        ############### end analysis here                  ###################################
+
+            
+                            
+    
+    elif inp == "v":
+        xyz = np.array(cur_stage_group["restart/xyz"])
+        fxyz_name = scrdir + "/" + cur_stage + "_restart.xyz"
+        f = open(fxyz_name, "w")
+        write_xyz(f, elems, xyz)
+        f.close()
+        launch_molden(fxyz_name)
+        
+    elif inp == "t":
+        print("\nVisualization of trajectory data of the current stage %s" % cur_stage)
+        if "traj" in list(cur_stage_group.keys()):
+           #  there is data to be visualaized .. go ahead
+           if "xyz_img" in list(cur_stage_group["traj"].keys()):
+               flag = input("Visualize xyz_img instead? [Y/n]")
+               if flag=="n":
+                   xyz_dsat = cur_stage_group["traj/xyz"]
+               else:
+                   xyz_dsat = cur_stage_group["traj/xyz_img"]
+           else:
+               xyz_dsat = cur_stage_group["traj/xyz"]
+           na = mol.natoms
+           nf = xyz_dsat.shape[0]
+           print("Total number of frames: %d" % nf)
+           start = input("First frame [1]: ")
+           if start == "": start = "1"
+           stop = input("Last frame [%d]: " % nf)
+           if stop == "": stop = str(nf)
+           step = input("Step [1]: ")
+           if step == "": step = "1"
+           start = int(start)-1
+           stop  = int(stop)
+           step  = int(step)
+           fxyz_name = scrdir + "/" + cur_stage + "_traj.xyz"
+           f = open(fxyz_name, "w")
+           xyz_buffer = np.empty([na,3],dtype="float32")
+           for i in range(start, stop, step):
+               print("Converting frame %d" % (i+1))
+               xyz_buffer[...] = xyz_dsat[i]
+               write_xyz(f, elems, xyz_buffer)
+           f.close()
+           launch_vmd(fxyz_name)
+           
+        else:
+            print("No trajectory data in the current stage! Sorry!")
+    
+    elif inp =="x":
+        print("\nAnalysis of trajectory data of the current stage with TRAVIS %s" % cur_stage)
+        if "traj" in list(cur_stage_group.keys()):
+           #  there is data to be visualaized .. go ahead
+           xyz_dsat = cur_stage_group["traj/xyz"]
+           na = pdiof.natoms
+           nf = xyz_dsat.shape[0]
+           print("Total number of frames: %d" % nf)
+           start = input("First frame [1]: ")
+           if start == "": start = "1"
+           stop = input("Last frame [%d]: " % nf)
+           if stop == "": stop = str(nf)
+           step = input("Step [1]: ")
+           if step == "": step = "1"
+           start = int(start)-1
+           stop  = int(stop)
+           step  = int(step)
+           fxyz_name = scrdir + "/" + "travis.xyz"
+           os.mkfifo(fxyz_name)
+           # fork a childprocess that writes out the stream
+           newpid = os.fork()
+           if newpid == 0:
+               f = open(fxyz_name, "w")
+               xyz_buffer = np.empty([na,3],dtype="float32")
+               for i in range(start, stop, step):
+                   xyz_buffer[...] = xyz_dsat[i]
+                   write_xyz(f, elems, xyz_buffer)
+               f.close()
+               # here our child process ends
+               os._exit(0)
+           else:
+               # here is our main process ... run travis and read stream
+               ret = subprocess.call(["travis", "-stream", "-p", fxyz_name])
+        else:
+            print("No trajectory data in the current stage! Sorry!")
+        
+    
+    elif inp == "q":
+        stop =True
+    
+    else:
+        stage = stages[int(inp)-1]
+        print(("Switching to stage %s") % stage)
+        cur_stage = stage
+    
+    
+########### clean up ######################################################
+
+print("\nWrite out mfp5 file")
+pdiof.close()
+inp = None
+while not (inp=="y" or inp=="n"):
+    inp = input("Do you want to remove the scratchdir? [y/n, default:y] ")
+    if inp =="": inp = "y"
+    
+if inp=="y":
+    shutil.rmtree(scrdir)
+    
+    
+print("******************************************************************")
+print("Thanks and cu again!")

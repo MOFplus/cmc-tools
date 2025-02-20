@@ -1,0 +1,13 @@
+ very minimalisitc example to demonstrate the use of an external potential.
+The distance between two atoms is restrained to a given distance.
+
+Note that the example external potential class expot_test defined in expot_base.py 
+is used here. If you want to design a new external potential please use it
+as a starting point. 
+
+This test does not run within pytest!! 
+run with 
+>>> python test_expot.py
+
+
+

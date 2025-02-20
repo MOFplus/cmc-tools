@@ -1,0 +1,76 @@
+#!/usr/bin/env python3 -i
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#  Script to convert (old) BB (former SBU) files into the new format
+#
+############################################################################
+
+import numpy 
+import os
+import sys 
+import pandas as pd
+from io import StringIO
+import matplotlib.pyplot as plt
+import pickle
+import pyblock
+
+interactive=True
+if sys.argv.count('-silent'):
+    interactive=False
+
+logfile = sys.argv[1]
+name = logfile.rsplit('.',1)[0]
+#f = open('produ.log')
+f = open(logfile)
+f = f.read()
+newtext = ''
+for xx in f.split('\n'):
+    x = xx.split()
+    if xx.count ('Volume Cella Cellb Cellc CellAlpha CellBeta CellGamma ') != 0: newtext += xx+'\n'
+    if len(x) < 10: continue
+    try:
+        float(x[0])
+        float(x[1])
+        float(x[2])
+        float(x[3])
+        float(x[4])
+        float(x[5])
+    except:
+        continue
+    newtext += xx+'\n'
+#text = f.rsplit('WARNING',1)[0].rsplit('Mbytes',1)[-1]
+#text2 = f.rsplit('Loop ',1)[0].rsplit('Mbytes',1)[-1]
+#data = pd.read_table(StringIO(text),delim_whitespace=True)
+#data2 = pd.read_table(StringIO(text2),delim_whitespace=True)
+# deprecated
+#data = pd.read_table(StringIO(newtext),delim_whitespace=True)
+# end deprecated
+data = pd.read_csv(StringIO(newtext),delim_whitespace=True)
+#if len(data2.keys()) > len(data.keys()):
+#    del text
+#    del data
+#    data = data2
+#    text = text2
+#else:
+#    del text2
+#    del data2
+
+print('"data" contains the log file data')
+
+# convenience
+C = [x for x in list(data.keys()) if x.count('Cell') != 0]
+cell = data[C]
+cellabc =data[['Cella','Cellb','Cellc']]
+cellangles =data[['CellAlpha','CellBeta','CellGamma']]
+cell.describe()
+
+pickle.dump(data,open(name+'.pickle','wb'))
+data.to_hdf(name+'.pdh5','log')
+
+if interactive is False:
+    os._exit(1)
+
+
+

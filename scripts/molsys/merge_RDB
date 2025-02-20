@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# This program merges db1 (main RDB) with db2
+
+import molsys
+from molsys.util import RDB
+import sys
+import os
+import shutil
+import gzip
+import json
+
+
+def cpc(path_from, path_to):
+    assert os.path.isdir(path_from), "The path to copy from (%s) exists." %path_from
+    assert os.path.isdir(path_to), "The path to copy to (%s) exists." %path_to
+    cpc_files = ['control','alpha','alpha.gz','auxbasis','basis','beta','beta.gz','coord','mos','mos.gz','dipgrad','hessian','vib_normal_modes','vibspectrum']
+    f_list = os.listdir(path_from)
+    for f in f_list:
+        if f in cpc_files:  
+            src = os.path.join(path_from, f)
+            if f in ['alpha','beta','mos']:
+                dst = os.path.join(path_to,   f+'.gz')
+                with open(src, 'rb') as f_in, gzip.open(dst, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            else:
+                dst = os.path.join(path_to,   f)
+                shutil.copyfile(src,dst)
+    return
+
+def copy_f_out(path_from, path_to):
+    assert os.path.isdir(path_from), "The path to copy from (%s) exists." %path_from
+    assert os.path.isdir(path_to), "The path to copy to (%s) exists." %path_to
+    f_list = os.listdir(path_from)
+    out_list = ['aoforce.out','ridft.out','dscf.out','freeh.out','ccsdf12.out','pnoccsd.out']
+    for f in f_list:
+        if f in out_list:
+            src = os.path.join(path_from, f)
+            dst = os.path.join(path_to,   f)
+            shutil.copyfile(src,dst)
+    return
+
+def get_cc_dirname(lot):
+    return "".join(".".join(".".join("".join(lot.split("*")).split("/")).split("(")).split(")"))
+
+
+print("In order to merge the QC calculations, please provide the lot.name as in db2 (the database you want to get the data to merge from)")
+if len(sys.argv) < 2:
+    print ("usage: merge_RDB <db_path_to> <db_path_from> (<lot.name/level1:DFT> <lot.name/level2:DFT>)")
+    exit
+
+db_path_to = sys.argv[1]
+db_path_from   = sys.argv[2]
+
+# data is stored under the database storage directory
+storage_dir = os.path.join(db_path_to, 'storage')
+md_data_dir = os.path.join(storage_dir, 'md_data')
+if not os.path.isdir(storage_dir):
+    os.mkdir(storage_dir)
+if not os.path.isdir(md_data_dir):
+    os.mkdir(md_data_dir)
+
+try:
+    level1_lot = sys.argv[3]
+except:
+    level1_lot = None
+try:
+    level2_lot = sys.argv[4]
+except:
+    level2_lot = None
+
+verbose = True
+
+rdb1 = RDB.RDB(db_path_to)
+rdb2 = RDB.RDB(db_path_from)
+
+db1 = rdb1.db
+db2 = rdb2.db
+
+## 1. Merge the MD tables
+md2 = db2(db2.md).select()
+
+md2_to_md1 = {}
+
+# Check if the script was run before:
+# TODO Not really straightforward to check if already in db. Maybe there is a better way. 
+f = "md2_to_md1.dict"
+if os.path.isfile(f):
+    answer = input("The file md2_to_md1.dict exists. That is you might have run the script to merge these two databases beforehand.\n If you select 'y', the md from the file won't be merged anymore.\n Do you want to use this information to continue with the merging of the md table? (y/n) \n ")
+    if answer == "y":
+        tmp_md2_to_md1 = json.load(open(f,'r'))
+        for m2, m1 in tmp_md2_to_md1.items():
+            md2_to_md1[int(m2)] = m1
+
+for md in md2:
+
+    print(md)
+
+    # If it was in the dictionary, skip the reaction
+    if md.id in md2_to_md1:
+         continue
+
+    # Add to the db
+    mdID = rdb1.set_md_run(md.path, md.stage, nframes=md.nframes, temp=md.temp, timestep=md.timestep)
+
+    # Now copy the trajectory file to the database
+    dst = os.path.join(md_data_dir, "md%d.hdf5" %mdID)
+    shutil.copyfile(md.path,dst)
+ 
+    # Update the record for path
+    relpath = os.path.relpath(dst, db_path_to)
+    md_in_db1 = db1(db1.md.id == mdID).select().first()
+    md_in_db1.update_record(path=relpath)
+    rdb1.commit()
+    
+    # Update the dictionary
+    md2_to_md1[md.id] = mdID
+
+if verbose:
+    print('md2_to_md1 = ', md2_to_md1)
+
+json.dump(md2_to_md1, open(f,'w'))
+
+## 2. Merge the revent tables
+revent2 = db2(db2.revent).select()
+
+
+revent2_to_revent1 = {}
+#revent2_to_reactions2 = {}
+
+for revent in revent2:
+    mdID2 = revent.mdID.get('id') # The mdID of the reaction event as in db2
+    mdID1 = md2_to_md1[mdID2] # The mdID of the reaction event as in db1
+
+    # check if the revent is already in db1
+    compare = db1((db1.revent.mdID == mdID1) & (db1.revent.frame == revent.frame)).select().first()
+    if compare != None:
+        revent2_to_revent1[revent.id] = compare.id
+        continue
+
+    # now let us register the reaction event in the database
+    revID = db1.revent.insert(
+          reversed   = revent.reversed,
+          mdID       = mdID1,
+          uni        = revent.uni,
+          frame      = revent.frame,
+          ed         = revent.ed,
+          ts         = revent.ts,
+          pr         = revent.pr,
+          tr_ed      = revent.tr_ed,
+          tr_pr      = revent.tr_pr,
+          rbonds     = revent.rbonds,
+          )
+    rdb1.commit()
+    revent2_to_revent1[revent.id] = revID
+
+if verbose:
+    print('revent2_to_revent1', revent2_to_revent1)
+
+
+## 3. Merge the species tables
+species2 = db2(db2.species).select()
+
+spc2_to_spc1 = {}
+for spc in species2:
+    fname, mfpxf = db2.species.compare_data.retrieve(spc.compare_data)
+    mfpxs = mfpxf.read().decode('utf-8')
+    mfpxf.close()
+    moldb = molsys.mol.from_string(mfpxs)
+    specID, is_new = rdb1.add_species(moldb, check_if_included=True, compare_type = "similaritycheck", tolstr = 0.1)
+    spc2_to_spc1[spc.id] = specID
+
+if verbose:
+    print('spc2_to_spc1 = ', spc2_to_spc1)
+
+
+## 4. Add the md_species
+md_species2 = db2(db2.md_species).select()
+
+md_spec2_to_md_spec1 = {}
+for md_spec in md_species2:
+
+    if verbose: print('md_spec:', md_spec)
+
+    # Get reventID
+    revID = revent2_to_revent1[md_spec.reventID.get('id')]
+    revent = db1(db1.revent.id == revID).select().first()
+
+    # Get mol
+    fname, mfpxf = db2.md_species.mfpx.retrieve(md_spec.mfpx)
+    mfpxs = mfpxf.read().decode('utf-8')
+    mfpxf.close()
+    mol = molsys.mol.from_string(mfpxs)
+
+    # Check if already in db1 
+    md_spec_in_db1 = db1((db1.md_species.reventID == revID) & (db1.md_species.spec == md_spec.spec) & (db1.md_species.foffset == md_spec.foffset) & (db1.md_species.atomids == md_spec.atomids)).select().first()
+
+    if md_spec_in_db1 != None:
+        if verbose: print('MD species %d from db2 is already in db1 with id %d.' %(md_spec.id,  md_spec_in_db1.id))
+        md_spec2_to_md_spec1[md_spec.id] = md_spec_in_db1.id
+        continue
+
+    # Add to the db1 
+    md_specID = rdb1.add_md_species(
+                        reventID = revent, 
+                        mol = mol,
+                        spec = md_spec.spec, 
+                        foff = md_spec.foffset, 
+                        aids = md_spec.atomids, 
+                        tracked = md_spec.tracked, 
+                        react_compl = md_spec.react_compl
+                    )
+
+    md_spec2_to_md_spec1[md_spec.id] = md_specID
+    if verbose: print('MD species %d is added.' %md_specID)
+
+    # Get specID & update this field if not None 
+    if md_spec.speciesID != None:
+       try:
+           specID = spc2_to_spc1[md_spec.speciesID]
+       except:
+           print("The species %d is not in the database! Skipping." %md_spec.speciesID)
+           continue
+       spec = db1(db1.species.id == specID).select().first()
+       md_spec_in_db1 = db1((db1.md_species.reventID == revID) & (db1.md_species.spec == md_spec.spec) & (db1.md_species.foffset == md_spec.foffset) & (db1.md_species.atomids == md_spec.atomids)).select().first()
+       md_spec_in_db1.update_record(speciesID = spec.id)
+       rdb1.commit()
+
+if verbose: print('md_spec2_to_md_spec1:', md_spec2_to_md_spec1)
+
+
+## 5. Merge the rgraph tables
+rgraph2 = db2(db2.rgraph).select()
+
+for rg in rgraph2:
+
+    from_rev  = revent2_to_revent1[rg.from_rev]
+    to_rev    = revent2_to_revent1[rg.to_rev]
+    try:
+        from_spec = spc2_to_spc1[rg.from_spec]
+    except:
+        print('Species %d is not in db2. Skipping rgraph %d from db2.' %(rg.from_spec, rg.id))
+        continue
+    try:
+        to_spec   = spc2_to_spc1[rg.to_spec]
+    except:
+        print('Species %d is not in db2. Skipping rgraph %d from db2' %(rg.to_spec, rg.id))
+        continue
+
+    # Check if already in DB
+    rg_in_db1 = db1((db1.rgraph.from_rev == from_rev) & (db1.rgraph.to_rev == to_rev) & (db1.rgraph.from_spec == from_spec) & (db1.rgraph.to_spec == to_spec)).select().first()
+
+    # If not add to the DB
+    if rg_in_db1 == None:
+        rgraphID = db1.rgraph.insert(
+                from_rev  = from_rev,
+                to_rev    = to_rev,
+                from_spec = from_spec,
+                to_spec   = to_spec
+                )
+        db1.commit() 
+
+## 6. Merge the reactions tables
+reactions2 = db2(db2.reactions).select()
+r2_to_r1 = {}
+
+# Check if the script was run before:
+# TODO Not really straightforward to check if already in db. Maybe there is a better way. 
+f = "r2_to_r1.dict"
+if os.path.isfile(f):
+    answer = input("The file r2_to_r1.dict exists. That is you might have run the script to merge these two databases beforehand.\n If you select 'y', the reactions from the file won't be merged anymore.\n Do you want to use this information to continue with the merging of the reactions? (y/n) \n ")    
+    if answer == "y":
+        tmp_r2_to_r1 = json.load(open(f,'r'))
+        for r2, r1 in tmp_r2_to_r1.items():
+            r2_to_r1[int(r2)] = r1
+
+# Now add the reactions
+for r in reactions2:
+
+    # If it was in the dictionary, skip the reaction
+    if r.id in r2_to_r1:
+         continue
+
+    # Otherwise add the reaction
+    if r.origin == None:
+        r_id_in_db1 = rdb1.register_reaction(uni = r.uni, change = r.change, source = r.source, origin = r.origin) 
+    else:
+        assert r.origin in r2_to_r1; 'r.origin is already registered!'
+        r_origin_in_db1 = r2_to_r1[r.origin]
+        r_id_in_db1 = rdb1.register_reaction(uni = r.uni, change = r.change, source = r.source, origin = r_origin_in_db1)
+
+    # Update the dictionary    
+    r2_to_r1[r.id] = r_id_in_db1 
+
+json.dump(r2_to_r1, open(f,'w'))
+
+if verbose: print('r2_to_r1',r2_to_r1)
+
+# 7. Add to the reac2spec table
+reac2spec2 = db2(db2.reac2spec).select()
+r2s2_to_r2s1 = {}
+
+# Check if the script was run before:
+# TODO Not really straightforward to check if already in db. Maybe there is a better way. 
+f = "r2s2_to_r2s1.dict"
+if os.path.isfile(f):
+    answer = input("The file r2s2_to_r2s1.dict exists. That is you might have run the script to merge these two databases beforehand.\n If you select 'y', the reac2spec from the file won't be merged anymore.\n Do you want to use this information to continue with the merging of the reac2spec? (y/n) \n ")    
+    if answer == "y":
+        tmp_r2s2_to_r2s1 = json.load(open(f,'r'))
+        for r2s2, r2s1 in tmp_r2s2_to_r2s1.items():
+            r2s2_to_r2s1[int(r2s2)] = r2s1
+
+for r2s in reac2spec2:
+    try:
+        reactID = r2_to_r1[r2s.reactionsID]
+    except:
+        print("The reaction %d is not in the reactions table of rdb %s. Skipping." %(r2s.reactionsID, db_path_from))
+        continue
+    specID = spc2_to_spc1[r2s.speciesID]
+    label = r2s.label
+
+    if r2s.id in r2s2_to_r2s1:
+        continue
+
+    r2sID = rdb1.add_reac2spec(reactID = reactID, specID = specID, itype = label)
+    r2s2_to_r2s1[r2s.id] = r2sID
+
+json.dump(r2s2_to_r2s1, open(f,'w'))
+
+if verbose: print('r2s2_to_r2s1', r2s2_to_r2s1)
+
+# 8. Add to the lot
+lot2 = db2(db2.lot).select()
+lot2_to_lot1 = {}
+
+for lot in lot2:
+    lotID = rdb1.get_lot(lot.name)
+    lot2_to_lot1[lot.id] = lotID
+
+# 9. Add to opt_species
+ospecs2 = db2(db2.opt_species).select()
+ospec2_to_ospec1 = {}
+
+for ospec in ospecs2:
+
+    # Generate mol object to add to db1
+    fname, mfpxf = db2.opt_species.mfpx.retrieve(ospec.mfpx)
+    mfpxs = mfpxf.read().decode('utf-8')
+    mfpxf.close()
+    mol = molsys.mol.from_string(mfpxs)
+    
+    # Other values as would be in db1
+    lotID = lot2_to_lot1[ospec.lotID]
+    lot = db2(db2.lot.id == ospec.lotID).select().first().name
+    energy = ospec.energy
+    try:
+        specID = spc2_to_spc1[ospec.speciesID]
+    except:
+        print("Species %d is not in the database. Skipping the optimized species %d." %(ospec.speciesID, ospec.id))
+        continue
+    change_molg = ospec.molgchange
+    rbonds = ospec.rbonds
+    info = ospec.info
+    src_path = os.path.join(db_path_from, ospec.path)
+
+    # Use these to check if already in db1
+    ospec_in_db1 = db1((db1.opt_species.lotID == lotID) & (db1.opt_species.energy == energy) & (db1.opt_species.speciesID == specID) & (db1.opt_species.rbonds == rbonds) & (db1.opt_species.info == info)).select().first()
+
+    if ospec_in_db1 == None:
+        if ospec.path != '':
+            assert lot == level1_lot or lot == level2_lot, 'DFT lot is provided/provided correctly!'
+        optID = rdb1.add_opt_species(mol = mol, lot = lot, energy = energy, specID = specID, path = '', change_molg = change_molg, rbonds = rbonds, info = info)
+        ospec_in_db1 = db1(db1.opt_species.id == optID).select().first()
+    else:
+        optID = ospec_in_db1.id
+
+    print('ospec_in_db1:', ospec_in_db1)
+
+    ospec2_to_ospec1[ospec.id] = optID
+
+    if ospec.path != '':
+
+        
+        # if it does not already exist create a DFT folder with the name of the method
+        dft_functional = lot.split("/")[0]
+        basis_set = lot.split("/")[1]
+        dft_dir_name = "-".join([dft_functional,basis_set])
+
+        dft_path = os.path.join(storage_dir, dft_dir_name)
+        if not os.path.isdir(dft_path):
+            os.mkdir(dft_path)
+
+        # now, copy everything needed to a directory under <path to db1>/storage/<DFT method>/ospec<id>
+        subdir_name = "ospec%d" %optID
+        ospec_path = os.path.join(dft_path, subdir_name)
+        if not os.path.isdir(ospec_path):
+            os.mkdir(ospec_path)
+        else:
+            print('DFT: The destination directory exists. Skipping the copying of the files from %s to %s.' %(src_path, ospec_path))
+ 
+        cpc(path_from = src_path, path_to = ospec_path)
+        copy_f_out(path_from = src_path, path_to = ospec_path)
+
+        if "CC" in ospec.info:
+            for info in ospec.info.split(";"):
+                if "CC" in info:
+                    lot_tmp = "(".join(info.split("(")[1:])
+                    lot_CC  = ")".join(lot_tmp.split(")")[:-1]) 
+                    CC_dir_name = get_cc_dirname(lot_CC)
+                    src = os.path.join(src_path, CC_dir_name)
+                    dst = os.path.join(ospec_path, CC_dir_name)
+                    if not os.path.isdir(dst):
+                        os.mkdir(dst)
+                    else:
+                        print('CC: The destination directory exists. Skipping the copying of the files from %s to %s.' %(src, dst))
+                    cpc(path_from = src, path_to = dst)
+                    copy_f_out(path_from = src, path_to = dst)
+
+        # Path relative to the db1 (/storage/<DFT method>/ospec<id>)
+        relpath = os.path.relpath(ospec_path, db_path_to)
+        ospec_in_db1.update_record(path=relpath)
+        rdb1.commit()        
+        print(ospec_in_db1)
+
+if verbose:
+    print('ospec2_to_ospec1', ospec2_to_ospec1)

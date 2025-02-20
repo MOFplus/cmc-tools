@@ -1,0 +1,106 @@
+#!/usr/bin/env python3 -i
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#  Script to convert (old) BB (former SBU) files into the new format
+#
+############################################################################
+
+import numpy 
+import os
+import shutil
+import subprocess
+import sys
+import molsys
+import h5py
+
+
+def write_xyz_to_traj(traj,xyz):
+    tshape = traj['xyz'].shape[0]
+    traj['xyz'].resize(tshape+1,axis=0)
+    traj['xyz'][-1,...] = xyz
+    #traj['xyz'][-1,...] = m.get_xyz_from_frac(xyz)
+    mfp5.flush()
+    return
+
+
+print('usage: [name] [dump] [mfp5]')
+
+write_cell=True
+
+name = sys.argv[1]
+dumpf = sys.argv[2]
+mfp5f = sys.argv[3]
+try: 
+    offset = int(sys.argv[4])
+except:
+    offset = 0
+stagename = dumpf.rsplit('.')[0]
+# /stage/restart/cell
+# /stage/restart/vel
+# /stage/restart/xyz
+
+# /stage/traj/nstep
+# /stage/traj/tstep
+# /stage/traj/xyz
+
+m = molsys.mol()
+m.read(name+'.mfpx')
+cell = m.get_cell()
+
+df = open(dumpf,'r')
+df.readline();df.readline();df.readline()
+natoms = int(df.readline())
+xyz = numpy.zeros((natoms,3),dtype=numpy.float32)
+
+
+mfp5 = h5py.File(mfp5f)
+stage= mfp5.require_group(stagename)
+traj = stage.require_group("traj")
+
+nstep_str = subprocess.getoutput("grep -A 1   'TIMESTEP' %s  | head -n 5" % (dumpf,))
+nstep = numpy.diff([int(x) for i,x in enumerate(nstep_str.split('\n')) if i in [1,4]])[0]
+print('nstep of %d detected' % (nstep,))
+traj.attrs['nstep'] = nstep  ## TODO: get this from the timing information in the dump file
+print('using default timestep of 1fs ... change code to do different!')
+traj.attrs['tstep'] = 0.001
+traj.create_dataset('xyz', dtype='float32',shape=(0,natoms,3),maxshape=(None,natoms,3),chunks=(1,natoms,3))
+
+rest = stage.require_group("restart")
+rest.create_dataset('xyz',dtype='float32',shape=(natoms,3))
+rest.create_dataset('vel',dtype='float32',shape=(natoms,3))
+rest.create_dataset('cell',dtype='float32',shape=(3,3))
+rest['cell'][...] = m.get_cell()
+rest['xyz'][...] = numpy.zeros((natoms,3),dtype='float32')
+rest['vel'][...] = numpy.zeros((natoms,3),dtype='float32')
+
+nsteps = 0
+atoms=False
+for i,l in enumerate(df):
+    if atoms == False:
+        if l.count('ITEM: ATOMS') == 0:
+            continue
+        else: 
+            atoms=True
+            continue
+    else:
+        if l.count('TIMESTEP') != 0:
+            write_xyz_to_traj(traj,xyz)
+            atoms=False
+            nsteps += 1
+            if nsteps % 100 == 0: print(nsteps)
+            continue
+        ls = l.split()
+        idx = int(ls[0])-1 - offset
+        try:
+            xyz[idx] = numpy.array([float(i) for i in ls[2:5]])
+        except:
+            xyz[idx] = numpy.array([float(i) for i in ls[3:6]],dtype='float32')
+    
+
+write_xyz_to_traj(traj,xyz)
+rest['xyz'][...] = xyz
+
+
+

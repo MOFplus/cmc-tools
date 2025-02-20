@@ -1,0 +1,7 @@
+sry, this is not a test.
+run it via
+python *.py
+
+or 
+
+mpirun -np x *.py

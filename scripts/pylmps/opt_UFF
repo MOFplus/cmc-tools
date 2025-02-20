@@ -1,0 +1,34 @@
+#!/usr/bin/env python3 
+
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#   Script to generate LAMMPS input for UFF                      
+#
+############################################################################
+
+import sys
+import os
+import pylmps
+
+fname = sys.argv[1]
+name = fname.rsplit('.',1)[0]
+print('name:', name)
+
+
+pl = pylmps.pylmps(name)
+
+pl.setup(local=True, ff="UFF",uff='UFF')
+
+pl.MIN(0.1)
+
+pl.LATMIN(0.1, 0.1)
+pl.LATMIN(0.05, 0.05)
+pl.MIN(0.01)
+
+pl.write(name+'_UFF_latopt.mfpx')
+
+
+
+

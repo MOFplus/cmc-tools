@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to translate the coordinates of an atomistic system        
+#
+#########################################################################
+
+
+import sys
+import os
+import string
+import molsys
+import copy
+argv = copy.deepcopy(sys.argv)
+
+
+if argv.count('-name') != 0:
+    idx = argv.index('-name')
+    name = argv[idx+1]
+    if name.rsplit('.',1)[-1] != 'mfpx':
+        name += '.mfpx'
+    print(argv.pop(idx),'name:', argv.pop(idx))
+else:
+    name = 'bb.mfpx'
+
+try:
+    smile = argv[1]
+except:
+    print('provide a smiles string as first argument!')
+
+
+m = molsys.mol.from_smiles(smile,maxiter=500)
+
+# write
+done=False; i=0
+while not done:
+    if os.listdir('.').count(name) ==0:
+        done = True
+    else:
+        name ='bb_'+str(i)+'.mfpx'
+        i += 1
+
+m.write(name)
+

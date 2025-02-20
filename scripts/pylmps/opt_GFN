@@ -1,0 +1,41 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#   Script to generate LAMMPS input for GFn-FF                      
+#
+############################################################################
+
+import sys
+import pylmps
+import molsys
+
+fname = sys.argv[1]
+name = fname.rsplit('.',1)[0]
+if len(sys.argv) > 2:
+    level = int(sys.argv[2])
+else:
+    level = 2
+assert level in (0,1,2)
+
+print ("Using Level GFN%d" % level)
+
+m = molsys.mol.from_file(name+".xyz")
+if level == 2:
+    assert m.bcond == 0, "No PBC supported here"
+
+ep = pylmps.expot_xtb(m, gfn_param=level)
+callback = ep.callback
+
+pl = pylmps.pylmps(name)
+
+pl.add_external_potential(ep, callback="callback")
+
+pl.setup(mol=m, ff="xTB", origin="center")
+
+pl.MIN(0.1)
+
+pl.write(name + "_gfn%1d_opt.xyz" % level)
+
+pl.end()

@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to convert different structure file formats based on molsys
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys.mol as mol
+
+
+fi = sys.argv[1]
+fo = sys.argv[2]
+fi_type = fi.split('.')[-1]
+fo_type = fo.split('.')[-1]
+
+thresh = 0.1
+if len(sys.argv) > 3:
+  thresh = float(sys.argv[3])
+
+
+m = mol()
+m.read(fi, ftype = fi_type)
+if fi_type == 'xyz':
+    m.detect_conn(remove_duplicates = False, thresh=thresh)
+    m.set_nofrags()
+
+if (fo_type == 'txyz' and fi_type=='mfpx' and m.fragtypes.count(-1) == 0): # we ask only if necessary
+    answer = raw_input('mfpx2txyz conversion. Do you want to add the fragment to the atomtype? [y/n, default:n]')
+    if answer == 'y':
+        m.atypes = [i+'@'+j for i,j in zip(m.atypes,m.fragtypes)]
+m.write(fo, ftype = fo_type)

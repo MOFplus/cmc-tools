@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+from molsys.util import RDB
+
+if len(sys.argv)<5:
+    print ("revent_from_RDB <dbname> <mfp5file> <stage> <TSfid>")
+    exit
+
+dbpath = sys.argv[1]
+mfp5f  = sys.argv[2]
+stage  = sys.argv[3]
+TSfid  = int(sys.argv[4])
+
+# make a new database
+db = RDB.RDB(dbpath)
+
+db.set_md_run(mfp5f, stage)
+
+storedir = "%s_revent_%d" % (stage, TSfid)
+os.mkdir(storedir)
+os.chdir(storedir)
+ed, ts, pr = db.get_revent_species(TSfid)
+print ("educts:   %s" % str(ed))
+print ("products: %s" % str(pr))
+print ("ts:       %s" % str(ts))
+for s in ed:
+    m, m_fname = db.get_md_species(TSfid, s, -1)
+    m.write("ed_%d.mfpx" % s)
+for s in pr:
+    m, m_fname = db.get_md_species(TSfid, s, 1)
+    m.write("pr_%d.mfpx" % s)
+m, m_fname = db.get_md_species(TSfid, ts, 0)
+m.write("ts_%d.mfpx" % ts)
+os.chdir("..")
+
+

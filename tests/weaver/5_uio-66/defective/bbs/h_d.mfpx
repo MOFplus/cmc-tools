@@ -1,0 +1,6 @@
+# type xyz
+# bbcenter coc
+# bbconn 1*1 / 2*2
+2
+  1 h      1.212436    0.000000    2.100000   h_              half-dummy                   0
+  2 xx     1.212436    0.000000   -0.700000   xx_             half-dummy                   0

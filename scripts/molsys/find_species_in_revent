@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+       find_species_in_revent
+
+"""
+import pylmps
+import molsys
+import sys
+import os
+import numpy as np
+from molsys.util import RDB
+
+if len(sys.argv) < 3:
+    print ("usage:  find_species_in_revent <db_path> <mfp5_file> <stage> <species (mfpx)>")
+    exit()
+
+
+def make_molecular_graph(mol):
+    mol.detect_conn()
+    mol.addon("graph")
+    mol.graph.make_graph()
+    mg = mol.graph
+    return mg
+
+#
+# Read command line arguments
+#
+db_path   = sys.argv[1]
+mfp5_path = sys.argv[2]
+mfp5_path = os.path.abspath(mfp5_path)
+stage     = sys.argv[3]
+fspecies  = sys.argv[4]
+
+print ("open database %s" % db_path)
+rdb = RDB.RDB(db_path)
+print ("dealing with MD from file %s and stage %s"  % (mfp5_path, stage))
+
+db = rdb.db
+md = db((db.md.path == mfp5_path) & (db.md.stage == stage)).select().first()
+revents = db((db.revent.mdID == md)).select()
+
+mol_to_find = molsys.mol.from_file(fspecies)
+molg_to_find = make_molecular_graph(mol_to_find)
+
+# now loop over revents
+for (i, cur_revent) in enumerate(revents):
+    mds = db((db.md_species.reventID == cur_revent) & (db.md_species.react_compl == False)  ).select()
+    for m in mds:
+        fname, mfpxf = db.md_species.mfpx.retrieve(m.mfpx)
+        mfpxs = mfpxf.read().decode('utf-8')
+        mfpxf.close()
+        mol = molsys.mol.from_string(mfpxs)
+        molg = make_molecular_graph(mol)
+        if ( molsys.addon.graph.is_equal(molg_to_find.molg, molg.molg, use_fast_check=False)[0]) :
+            print("Found species in reaction %s at frame %s " % (i, cur_revent.frame))

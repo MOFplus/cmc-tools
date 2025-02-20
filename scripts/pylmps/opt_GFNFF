@@ -1,0 +1,33 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+###########################################################################
+#
+#   Script to generate LAMMPS input for GFn-FF                      
+#
+############################################################################
+
+import sys
+import pylmps
+import molsys
+
+fname = sys.argv[1]
+name = fname.rsplit('.',1)[0]
+
+m = molsys.mol.from_file(name+".xyz")
+assert m.bcond == 0, "No PBC supported here"
+
+ep = pylmps.expot_xtb(m, gfn_param=-1)
+callback = ep.callback
+
+pl = pylmps.pylmps(name)
+
+pl.add_external_potential(ep, callback="callback")
+
+pl.setup(mol=m, ff="xTB", origin="center")
+
+pl.MIN(0.1)
+
+pl.write(name + "_gfnff_opt.xyz")
+
+pl.end()

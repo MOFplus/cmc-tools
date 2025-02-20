@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os
+import shutil
+import gzip
+import sys
+import molsys
+import json
+from molsys.util import RDB
+from molsys.util import refine_qm_turbomole
+
+
+def getKeysByValue(dictOfElements, valueToFind):
+    listOfKeys = list()
+    listOfItems = dictOfElements.items()
+    for item  in listOfItems:
+        if item[1] == valueToFind:
+            listOfKeys.append(item[0])
+    return  listOfKeys
+
+def cpc(path_from, path_to):
+    assert os.path.isdir(path_from), "The path to copy from (%s) exists." %path_from
+    assert os.path.isdir(path_to), "The path to copy to (%s) exists." %path_to
+    cpc_files = ['control','alpha','auxbasis','basis','beta','coord','mos','dipgrad','hessian','vib_normal_modes','vibspectrum']
+    f_list = os.listdir(path_from)
+    for f in f_list:
+        if f in cpc_files:
+            src = os.path.join(path_from, f)
+            if f in ['alpha','beta','mos']:
+                dst = os.path.join(path_to,   f+'.gz')
+                with open(src, 'rb') as f_in, gzip.open(dst, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            else:
+                dst = os.path.join(path_to,   f)
+                shutil.copyfile(src,dst)
+    return
+
+def copy_f_out(path_from, path_to):
+    assert os.path.isdir(path_from), "The path to copy from (%s) exists." %path_from
+    assert os.path.isdir(path_to), "The path to copy to (%s) exists." %path_to
+    f_list = os.listdir(path_from)
+    out_list = ['aoforce.out','ridft.out','dscf.out','freeh.out','ccsdf12.out','pnoccsd.out']
+    for f in f_list:
+        if f in out_list:
+            src = os.path.join(path_from, f)
+            dst = os.path.join(path_to,   f)
+            shutil.copyfile(src,dst)
+    return
+
+# input
+if len(sys.argv) < 4:
+    print ("usage:  add_qm_species_to_RDB <db_path> <data_path> <level>")
+    exit()
+
+db_path  = os.path.abspath(sys.argv[1])
+data_path = os.path.abspath(sys.argv[2])
+level    = os.path.abspath(sys.argv[3])
+verbose = False
+
+rdb = RDB.RDB(db_path)
+db = rdb.db
+
+# data is stored under the database storage directory
+storage_dir = os.path.join(db_path, 'storage')
+
+if 'level1' in level.lower():
+    # Many to many relationship join the tables
+    reactions_and_species = db((db.reactions.id == db.reac2spec.reactionsID) & (db.species.id == db.reac2spec.speciesID))
+
+    # Get the formulas of the existing reactions
+    reaction_formulas = {}
+    for r in db().select(db.reactions.ALL):
+        sumform_ed = []
+        sumform_prod = []
+        sumform_ts = []
+        for row in reactions_and_species(db.reactions.id == r.id).select():
+            if row.reac2spec.label   == -1:
+                sumform_ed.append(row.species.sumform)
+            elif row.reac2spec.label == 1:
+                sumform_prod.append(row.species.sumform)
+            elif row.reac2spec.label == 0:
+                sumform_ts.append(row.species.sumform)
+        forward  = '+'.join(sumform_ed)+':'+'+'.join(sumform_ts)+':'+'+'.join(sumform_prod)
+        reaction_formulas[r.id] = forward
+
+dft_subdir_paths = []
+for path in os.listdir(data_path):
+   dft_subdir_path = os.path.join(data_path, path)
+   if os.path.isdir(dft_subdir_path):
+       dft_subdir_paths.append(dft_subdir_path)
+
+list_new_reactions = []
+for dft_subdir_path in dft_subdir_paths:
+
+    if 'level1' in level.lower():
+        f_json = os.path.join(dft_subdir_path,'r.json')
+        if os.path.isfile(f_json):
+             with open(f_json) as f:
+                 data = json.load(f)
+                 for rxn in data:
+
+                     # 1) Get the info from the json file:
+                     r  = data[rxn]['reaction']
+                     opt_spec = data[rxn]['opt_spec']
+                     lot = opt_spec['0']['lot']
+                     lotID = db(db.lot.name == opt_spec['0']['lot']).select().first()
+                     origin = db(db.reactions.id == r['origin']).select().first()
+
+                     # if it does not already exist create a DFT folder with the name of the method
+                     dft_functional = lot.split("/")[0]
+                     basis_set = lot.split("/")[1]
+                     dft_dir_name = "-".join([dft_functional,basis_set])
+             
+                     db_dft_path = os.path.join(storage_dir, dft_dir_name)
+                     if not os.path.isdir(db_dft_path):
+                         os.mkdir(db_dft_path)
+
+                     # 2) Then, check if the reaction might have already been registered
+
+                     # 2.1) Create mol object of the reactants and educts for further comparison
+                     # and generate a chemical reaction equation using the sumformula of the species
+                     # for the pre-selection of the reactions to compare
+                     mols_ed = []
+                     mols_prod = []
+                     sumform_ed = []
+                     sumform_prod = []
+                     sumform_ts = []
+                     for i in opt_spec:
+                         spec_info = opt_spec[i]
+                         abs_path = os.path.abspath(os.path.join(dft_subdir_path,spec_info['path']))
+                         GT = refine_qm_turbomole.GeneralTools(abs_path)
+                         mol = GT.coord_to_mol()
+                         sumform = mol.get_sumformula()
+                         if spec_info['itype']  == -1:
+                             mols_ed.append(mol)
+                             sumform_ed.append(sumform)
+                         elif spec_info['itype'] == 1:
+                             mols_prod.append(mol)
+                             sumform_prod.append(sumform)
+                         elif spec_info['itype'] == 0:
+                             sumform_ts.append(sumform)
+                     forward = '+'.join(sumform_ed)+':'+'+'.join(sumform_ts)+':'+'+'.join(sumform_prod)
+                     reverse = '+'.join(sumform_prod)+':'+'+'.join(sumform_ts)+':'+'+'.join(sumform_ed)
+
+                     # 2.2) Select the reactions which have the same sumformula
+                     r_comp_ids = getKeysByValue(reaction_formulas,forward) + getKeysByValue(reaction_formulas,reverse)
+
+                     # 2.3) Now check for each of these reactions if they are already registered
+                     skip = False
+                     for r_comp_id in r_comp_ids:
+                          if verbose: print("Comparing the reaction from file %s with reaction %d." %(f_json, r_comp_id))
+                          r_comp = db(db.reactions.id == r_comp_id).select().first()
+                          r_comp_species = db(db.reac2spec.reactionsID == r_comp.id).select()
+
+                          # Make mol object of the species to be compared
+                          mols_ed_comp = []
+                          mols_prod_comp = []
+                          skip_r_comp = False
+                          for comp_spec in r_comp_species:
+                              opt_comp = db((db.opt_species.speciesID == comp_spec.speciesID) & (db.opt_species.lotID == lotID)).select().first()
+                              if opt_comp == None:
+                                  if verbose: print('The species %d is not geometry optimised at the level of theory %d.' %(comp_spec.speciesID, lotID))
+                                  skip_r_comp = True
+                                  continue
+                              fname, mfpxf = db.md_species.mfpx.retrieve(opt_comp.mfpx)
+                              mfpxs = mfpxf.read().decode('utf-8')
+                              mfpxf.close()
+                              mol_comp = molsys.mol.from_string(mfpxs)
+                              if comp_spec.label  == -1:
+                                  mols_ed_comp.append(mol_comp)
+                              elif comp_spec.label == 1:
+                                  mols_prod_comp.append(mol_comp)
+
+                          # If the reaction is not optimised at this level of theory, do not compare any further
+                          if skip_r_comp: continue
+
+                          # Finally, compare them!
+                          OT = refine_qm_turbomole.OptimizationTools()
+                          similar, m, idxd = OT.check_end_points(mols_ed_comp, mols_prod_comp, mols_ed, mols_prod, mode='similaritycheck')
+
+                          if similar:
+                               reaction = r_comp
+                               if verbose: print("This reaction is similar to the reaction %d." %(reaction.id))
+                               skip = True
+
+                     # 3) If not registered already, then add it to the DB
+                     if skip:
+                             if verbose: print("Reaction %d is already registered. Skipping." %(reaction.id))
+                     else:
+                         # 3.1) register the reaction
+                         reactID = rdb.register_reaction(uni = r['uni'], change = r['change'], source = r['source'], origin = origin)
+                         print("The new reaction %d from origin %d is added to the database." %(reactID,origin.id))
+                         list_new_reactions.append(reactID)
+
+                         # 3.2) check if any of the optimised species are already in the database
+                         opt_spec = data[rxn]['opt_spec']
+                         for i in opt_spec:
+                             spec_info = opt_spec[i]
+
+                             src = os.path.abspath(os.path.join(dft_subdir_path,spec_info['path']))
+                             GT = refine_qm_turbomole.GeneralTools(src)
+
+                             mol = GT.coord_to_mol()
+                             # Check if the optimized species is already in the database
+                             en_tol = 0.0005 # tolerance of comparison in Hartree
+                             lotID = db(db.lot.name == spec_info['lot']).select().first()
+                             comp = db(((db.opt_species.energy <= spec_info['energy'] + en_tol) & (db.opt_species.energy >= spec_info['energy'] - en_tol)) & (db.opt_species.lotID == lotID)).select()
+                             similar = False
+                             for m in comp:
+                                 fname, mfpxf = db.md_species.mfpx.retrieve(m.mfpx)
+                                 mfpxs = mfpxf.read().decode('utf-8')
+                                 mfpxf.close()
+                                 mol_comp = molsys.mol.from_string(mfpxs)
+                                 similar = GT.similaritycheck_from_mol(mol_comp, mol)
+
+                             # 3.2.1) if they are similar update the reac2spec information and do not add to the opt_species table:
+                             if similar:
+                                 # Add to the reac2spec table
+                                 if verbose: print("The optimised species is the same as the species %d optimised at lot %s. Therefore, only the reac2spec table will be updated!" %(m.speciesID, spec_info['lot']))
+                                 reac2specID = rdb.add_reac2spec(reactID = reactID, specID = m.speciesID, itype = spec_info['itype'])
+                             # 3.2.2) if they are not similar add to the reac2spec and to the opt_species table:
+                             else:
+                                 # Add to the species table
+                                 specID, is_new = rdb.add_species(mol = mol)
+                                 # Add to the reac2spec table
+                                 reac2specID = rdb.add_reac2spec(reactID = reactID, specID = specID, itype = spec_info['itype'])
+                                 # Add to the opt_species table
+                                 optID = rdb.add_opt_species(mol         = mol,
+                                                             specID      = specID, 
+                                                             lot         = spec_info['lot'], 
+                                                             energy      = spec_info['energy'],
+                                                             path        = '', 
+                                                             change_molg = r['change'],
+                                                             rbonds      = None,
+                                                             info        = spec_info['info'])
+
+                                 # Now copy everything needed to a directory under <db_path>/storage/<DFT method>
+                                 dst = os.path.join(db_dft_path, 'ospec%d' %optID)
+                                 if not os.path.isdir(dst):
+                                     os.mkdir(dst)
+                                 cpc(src, dst)
+                                 copy_f_out(src, dst)
+
+                                 # Path relative to the db (/storage/<DFT method>/ospec<id>)
+                                 ospec = db(db.opt_species.id == optID).select().first()
+                                 relpath = os.path.relpath(dst, db_path)
+                                 ospec.update_record(path=relpath)
+                                 rdb.commit()        
+        else:
+            if verbose: print("%s does not exist." %f_json)
+
+
+    elif 'level2' in level.lower():
+        src = dft_subdir_path
+        f_json = os.path.join(dft_subdir_path,'ospec.json')
+        if os.path.isfile(f_json):
+             with open(f_json) as f:
+                 data = json.load(f)
+                 GT = refine_qm_turbomole.GeneralTools(dft_subdir_path)
+                 mol = GT.coord_to_mol()
+                 lot = data['lot']
+                 lotID = rdb.get_lot(lot)
+                 # if it does not already exist create a DFT folder with the name of the method
+                 dft_functional = lot.split("/")[0]
+                 basis_set = lot.split("/")[1]
+                 dft_dir_name = "-".join([dft_functional,basis_set])
+             
+                 db_dft_path = os.path.join(storage_dir, dft_dir_name)
+                 if not os.path.isdir(db_dft_path):
+                     os.mkdir(db_dft_path)
+
+                 ospec = db((db.opt_species.lotID == lotID) & (db.opt_species.speciesID == data['specID']) & (db.opt_species.energy == data['energy']) & (data['info'] in db.opt_species.info)).select().first()
+
+                 if ospec != None:
+                     print("Optimized species %d from species %d is already registered." %(ospec.id, data['specID']))
+                 else:
+                     # Add to the opt_species table
+                     optID = rdb.add_opt_species(mol         = mol,
+                                                 specID      = data['specID'],
+                                                 lot         = data['lot'],
+                                                 energy      = data['energy'],
+                                                 path        = '',
+                                                 change_molg = data['change_molg'],
+                                                 rbonds      = None,
+                                                 info        = data['info'])
+                     # Now copy everything needed to a directory under <db_path>/storage/<DFT method>
+                     dst = os.path.join(db_dft_path, 'ospec%d' %optID)
+                     if not os.path.isdir(dst):
+                         os.mkdir(dst)
+                     cpc(src, dst)
+                     copy_f_out(src, dst)
+
+                     # Path relative to the db (/storage/<DFT method>/ospec<id>)
+                     ospec = db(db.opt_species.id == optID).select().first()
+                     relpath = os.path.relpath(dst, db_path)
+                     ospec.update_record(path=relpath)
+                     rdb.commit()
+                     print("Optimized species %d from species %d is registered." %(int(optID), data['specID']))
+        else:
+            print("%s does not exist." %f_json)
+
+    elif 'level3' in level.lower():
+        f_json = os.path.join(dft_subdir_path,'ccsd.json')
+        if os.path.isfile(f_json):
+             with open(f_json) as f:
+                 data = json.load(f)
+                 ospec = db(db.opt_species.id == data['ospecID']).select().first()
+                 if data['info'] in ospec.info:
+                     print('Info of the optimized species %d  is already updated!' %data['ospecID'])
+                 else:
+                    # Add the CC energy to the database
+                    ospec.info += data['info']
+                    ospec.update_record()
+
+                    # Copy the necessary files to the database
+                    lot_tmp = "(".join(data['info'].split("(")[1:])
+                    lot_CC  = ")".join(lot_tmp.split(")")[:-1])
+                    CC_dir_name = "".join(".".join(".".join("".join(lot_CC.split("*")).split("/")).split("(")).split(")"))
+                    src = os.path.join(dft_subdir_path, CC_dir_name)
+                    dst = os.path.join(os.path.join(db_path, ospec.path), CC_dir_name)
+                    if not os.path.isdir(dst):
+                       os.mkdir(dst)
+                    else:
+                       print('CC: The destination directory exists. Skipping the copying of the files from %s to %s.' %(src, dst))
+                    cpc(src, dst)
+                    copy_f_out(src,dst)
+
+                    # Commit changes to the DB
+                    db.commit()
+                    print("The record of the optimized species %d is updated." %data['ospecID'])
+        else:
+            print("%s does not exist." %f_json)
+
+
+if 'level1' in level.lower():
+    print("The list of registered reactions: ", list_new_reactions)

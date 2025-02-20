@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+########################################################################
+#
+#  Script to convert different structure file formats based on molsys
+#
+#########################################################################
+
+
+import sys
+import string
+import molsys.util.unit_cell as unit_cell
+import molsys.mol as mol
+
+fi = sys.argv[1]
+if len(sys.argv)== 2:
+    fo = fi.rsplit('.',1)[0] + '.mfpx'
+else:
+    fo = sys.argv[2]
+
+fi_type = fi.split('.')[-1]
+fo_type = fo.split('.')[-1]
+
+if fi_type == 'xyz':
+    m.detect_conn(remove_duplicates = True)
+    m.set_nofrags()
+
+m = mol()
+m.read(fi, ftype = fi_type)
+m.addon('bb')
+m.bb.add_bb_info()
+
+
+m.write(fo, ftype = fo_type)
