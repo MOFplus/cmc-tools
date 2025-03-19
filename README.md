@@ -9,7 +9,7 @@ The following sections will outline how to setup our tools on a recent linux des
 This repository contains four interwoven modules:
 * molsys: another pure python library to handle molecular systems, base class for pylmps as well as other codes
 * pylmps: our python lammps wrapper, inspired by the older pydlpoly code
-* mofplus: a little addon to connect to the MOF+ website http://www.mpofplus.org, needed for paramter assignement and other tasks
+* mofplus: a little addon to connect to the MOF+ website http://www.mofplus.org, needed for paramter assignement and other tasks
 * weaver: a package for constructing MOFs according to the reverse topological approach, given a set of building blocks and a topology
 
 Additionally we maintane a custom fork of LAMMPS, which is needed in conjunction with pylmps and can be found [here](https://github.com/MOFplus/lammps)!
@@ -106,7 +106,7 @@ export CMCTOOLS=$CMC_INSTALL_DIR/cmc-tools
 export REAXFF_FILES=$CMC_INSTALL_DIR/lammps/potentials
 
 export PYTHONPATH=$CMCTOOLS/src:$PYTHONPATH
-export PYTHONPATH=$CMC_INSTALL_DIR/lammps/python:PYTHONPATH
+export PYTHONPATH=$CMC_INSTALL_DIR/lammps/python:$PYTHONPATH
 
 export PATH=$CMCTOOLS/scripts/molsys:$PATH
 export PATH=$CMCTOOLS/scripts/pylmps:$PATH
@@ -192,7 +192,7 @@ make -j4
 This will now take a while ... and hopefully work. It should have built a *liblammps.so* (which is actually a softlink to liblammps.so.0). In order to access this shared obejct you need to softlink it from the */python* directory like this:
 ```bash
 cd ../python/lammps
-ln -s ../../build/liblammps.so .
+ln -s ../../build_2024/liblammps.so .
 ```
 You should be good to go now!
 ## Test if everything worked
@@ -200,8 +200,8 @@ Generate some working directory and copy some test files into it.
 ```bash
 mkdir pylmps_test
 cd pylmps_test
-cp $CMCTOOLS/pylmps/tests/generic/hkust1.* .
-cp $CMCTOOLS/pylmps/tests/generic/test_opt_hkust1.py .
+cp $CMCTOOLS/tests/pylmps/generic/hkust1.* .
+cp $CMCTOOLS/tests/pylmps/generic/test_opt_hkust1.py .
 python test_opt_hkust1.py
 ```
 This will copy an mfpx (MOF+ coordiante file) together with the pair of ric/par (containing redundant internal coordiantes and force field paramters) to your test dir.
