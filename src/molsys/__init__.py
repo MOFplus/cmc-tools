@@ -12,6 +12,7 @@ from . import addon
 
 def git_revision_hash():
     wrk_dir = os.getcwd()
+    status = None
     try:
         src_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(src_dir)

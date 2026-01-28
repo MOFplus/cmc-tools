@@ -43,6 +43,7 @@ def read(mol, f):
     topoinfo["transitivity"] = "None"
     topoinfo["emapping"]  = "None"
     has_color = False
+    has_charge = None
     while not stop:
         if lbuffer[0] != '#':
             mol.natoms = int(lbuffer[0])
@@ -100,12 +101,22 @@ def read(mol, f):
                 else:
                     assert topokeyw not in topoinfo, "keyword %s appears twice" % ("topo_" + topokeyw)
                     topoinfo[topokeyw] = lbuffer[2]
+            elif keyword == 'charge':
+                has_charge = lbuffer[2] # store method in flag
             lbuffer = f.readline().split()
     if mol.is_bb == True: ftype = 'bb'
     ### read body
     if ftype == 'xyz':
-        mol.elems, mol.xyz, mol.atypes, mol.conn, mol.fragtypes, mol.fragnumbers =\
-            read_body(f,mol.natoms,frags=True)
+        if has_charge != None:
+            mol.elems, mol.xyz, mol.atypes, mol.conn, mol.fragtypes, mol.fragnumbers, q =\
+            read_body(f,mol.natoms,frags=True, has_charge=True)
+            mol.addon("charge")
+            mol.charge.q[:] = q
+            mol.charge.has_charges = True
+            mol.charge.method = has_charge
+        else:
+            mol.elems, mol.xyz, mol.atypes, mol.conn, mol.fragtypes, mol.fragnumbers =\
+            read_body(f,mol.natoms,frags=True, has_charge=False)
     elif ftype == 'topo':
         # topo file so set the corresponding flags
         mol.is_topo =   True
@@ -204,6 +215,7 @@ def write(mol, f, fullcell = True, topoformat = "new"):
         mol.set_nofrags()
     if mol.is_topo:
         ftype = 'topo'
+        has_charge = None
         if mol.use_pconn == False:
             # this is a topo object but without valid pconn. for writing we need to generate it
             mol.add_pconn()
@@ -237,8 +249,13 @@ def write(mol, f, fullcell = True, topoformat = "new"):
             topoinfo["format"] = "old"
     elif mol.is_bb:
         ftype = "bb"
+        has_charge = None
     else:
         ftype = 'xyz'
+        has_charge = None
+        if "charge" in mol.loaded_addons:
+            if mol.charge.has_charges:
+                has_charge = mol.charge.method
     f.write('# type %s\n' % ftype)
     if mol.bcond>0:
         if fullcell:
@@ -305,9 +322,12 @@ def write(mol, f, fullcell = True, topoformat = "new"):
         ### ORIENTATION DEFINITION #############################################
         o = len(mol.orientation) * "%3d" % tuple(mol.orientation)
         f.write('# orient '+o+"\n")
+    if has_charge:
+        f.write("# charge %s\n" % has_charge)
+    # END of keywords
     f.write('%i\n' % mol.natoms)
     if ftype == 'xyz' or ftype == "bb":
-        write_body(f,mol)
+        write_body(f,mol, has_charge=has_charge)
     else:
         # this is all a hack .. restructure write/read body etc. .... currently we keep it makeing the mess even bigger .. sick!
         topo_new = False
@@ -350,8 +370,13 @@ def parse_connstring(mol, con_info):
 
 ## this is read_body and write_body from txyz. due to the specific needs and special format of mfpx files these functions have been moved over here (RS)
 
+# RS 2025 : added option for storing charge 
+#           if mol object has charge addon and charges have been defines (has_charges = True)
+#           add a line with charge <method> to the file and write charges after xyz coords.
+#           if charge is detected in read then charge addon is added and charge are set.
 
-def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=False, has_color=False):
+
+def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=False, has_color=False, has_charge=False):
     """
     Routine, which reads the body of a txyz or a mfpx file
     :Parameters:
@@ -365,6 +390,8 @@ def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=Fal
                                 really a big mess which needs to be cleaned up.
                                 do we still need the cromo format? ever used?
 
+    RS 2025 : added has_charge flag
+
     """
     elems       = []
     xyz         = []
@@ -377,11 +404,16 @@ def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=Fal
     oconn      = []
     vcolor     = []
     ecolor     = []
+    q          = []
+    qoffset    = 0
+    if has_charge:
+        qoffset = 1
     if has_color:
         assert topo
         assert topo_new
     if topo: 
         frags=False
+        assert not has_charge
     for i in range(natoms):
         lbuffer = f.readline().split()
         xyz.append([float(j) for j in lbuffer[2:5]])
@@ -390,12 +422,14 @@ def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=Fal
             e, vc = e.split("_")[:2]
             vcolor.append(int(vc))
         elems.append(e)
-        t = lbuffer[5]
+        if has_charge:
+            q.append(float(lbuffer[5]))
+        t = lbuffer[5+qoffset]
         atypes.append(t)
         if frags == True:
-            fragtypes.append(lbuffer[6])
-            fragnumbers.append(int(lbuffer[7]))
-            offset = 2
+            fragtypes.append(lbuffer[6+qoffset])
+            fragnumbers.append(int(lbuffer[7+qoffset]))
+            offset = 2+qoffset
         else:
             if topo_new:
                 fragtypes.append('0')  # why "0" and not "-1" ???
@@ -440,10 +474,12 @@ def read_body(f, natoms, frags = True, topo = False, cromo = False, topo_new=Fal
 #                return elems, numpy.array(xyz), atypes, conn, fragtypes, fragnumbers, pconn
                 return elems, numpy.array(xyz), atypes, conn, pconn, pimages
     else:
+        if has_charge:
+            return elems, numpy.array(xyz), atypes, conn, fragtypes, fragnumbers, numpy.array(q)
         return elems, numpy.array(xyz), atypes, conn, fragtypes, fragnumbers
 
 
-def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=False):
+def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=False, has_charge=False):
     """
     Routine, which writes the body of a txyz or a mfpx file
     :Parameters:
@@ -455,6 +491,7 @@ def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=F
         -plain  (bool) : plain Tinker file supported by molden
         -topo_new(bool): if True the new format with skey mapping (hidden in fragnumbers) is written
     """
+    assert not plain, "Plain Tinker files are not supported for mfpx write"
     if topo:
         frags = False   #from now on this is convention! yuck .. why do we specify it in the first place then?
     if topo: pconn = mol.pconn
@@ -472,6 +509,8 @@ def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=F
     cnct        = mol.conn
     natoms      = mol.natoms
     atypes      = mol.atypes
+    if has_charge:
+        q = mol.charge.q
     if mol.cellparams is not None and not pbc:
         mol.set_conn_nopbc()
         cnct = mol.conn_nopbc
@@ -496,22 +535,23 @@ def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=F
     #    if frags:
     #        fragtypes   = numpy.take(fragtypes, atoms_withconn).tolist()
     #        fragnumbers = numpy.take(fragnumbers, atoms_withconn).tolist()
-    if plain:
-        if frags:
-            fragtypes = [None]*len(atypes)
-            fragnumbers = [None]*len(atypes)
-            oldatypes = list(zip(atypes, fragtypes, fragnumbers))
-        else:
-            oldatypes = atypes[:]
-        # unique atomtypes
-        u_atypes = set(Counter(oldatypes).keys())
-        u_atypes -= set([a for a in u_atypes if str(a).isdigit()])
-        u_atypes = sorted(list(u_atypes))
-        # old2new atomtypes
-        o2n_atypes = {e:i for i,e in enumerate(u_atypes)}
-        n2o_atypes = {i:e for i,e in enumerate(u_atypes)}
-        atypes = [a if str(a).isdigit() else o2n_atypes[a] for a in oldatypes]
-        frags = False ### encoded in one column only
+    # RS 2025 looks like plain should never be True here
+    # if plain:
+    #     if frags:
+    #         fragtypes = [None]*len(atypes)
+    #         fragnumbers = [None]*len(atypes)
+    #         oldatypes = list(zip(atypes, fragtypes, fragnumbers))
+    #     else:
+    #         oldatypes = atypes[:]
+    #     # unique atomtypes
+    #     u_atypes = set(Counter(oldatypes).keys())
+    #     u_atypes -= set([a for a in u_atypes if str(a).isdigit()])
+    #     u_atypes = sorted(list(u_atypes))
+    #     # old2new atomtypes
+    #     o2n_atypes = {e:i for i,e in enumerate(u_atypes)}
+    #     n2o_atypes = {i:e for i,e in enumerate(u_atypes)}
+    #     atypes = [a if str(a).isdigit() else o2n_atypes[a] for a in oldatypes]
+    #     frags = False ### encoded in one column only
     xyzl = xyz.tolist()
     for i in range(natoms):
         # RS add color info in mfpx .. this is all a big mess and needs to be cleaned up (2022)
@@ -519,8 +559,12 @@ def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=F
         if topo_new:
             if mol.topo.has_color:
                 e += "_%d" % mol.topo.vcolor[i] # only for topo_new we can expect that the mol object has a topo addon
-        line = ("%3d %-3s" + 3*"%12.6f" + "   %-24s") % \
-            (i+1, e, xyzl[i][0], xyzl[i][1], xyzl[i][2], atypes[i])
+        if has_charge:
+            line = ("%3d %-3s" + 3*"%12.6f" + "%12.8f" + "   %-24s") % \
+                (i+1, e, xyzl[i][0], xyzl[i][1], xyzl[i][2], q[i], atypes[i])
+        else:
+            line = ("%3d %-3s" + 3*"%12.6f" + "   %-24s") % \
+                (i+1, e, xyzl[i][0], xyzl[i][1], xyzl[i][2], atypes[i])
         if frags is True:
             line += ("%-16s %5d ") % (fragtypes[i], fragnumbers[i])
         elif topo_new is True:
@@ -558,14 +602,15 @@ def write_body(f, mol, frags=True, topo=False, pbc=True, plain=False, topo_new=F
             else:
                 line += (len(conn)*"%7d ") % tuple(conn)
         f.write("%s \n" % line)
-    if plain:
-        if frags:
-            f.write("### atype: (old_atype, fragment_type, fragment_number)\n")
-            n2o_fmt = pprint.pformat(n2o_atypes, indent=4)
-        else:
-            f.write("### atype: old_atype\n")
-            n2o_fmt = pprint.pformat(n2o_atypes, indent=4, width=1) #force \n
-        n2o_fmt = n2o_fmt.strip("{}")
-        n2o_fmt = "{\n " + n2o_fmt + "\n}\n"
-        f.write(n2o_fmt)
+    # RS 2025 seems like plain should never happen here ... so maybe we can comment this out
+    # if plain:
+    #     if frags:
+    #         f.write("### atype: (old_atype, fragment_type, fragment_number)\n")
+    #         n2o_fmt = pprint.pformat(n2o_atypes, indent=4)
+    #     else:
+    #         f.write("### atype: old_atype\n")
+    #         n2o_fmt = pprint.pformat(n2o_atypes, indent=4, width=1) #force \n
+    #     n2o_fmt = n2o_fmt.strip("{}")
+    #     n2o_fmt = "{\n " + n2o_fmt + "\n}\n"
+    #     f.write(n2o_fmt)
     return

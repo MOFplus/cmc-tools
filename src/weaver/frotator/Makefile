@@ -24,7 +24,7 @@ all:
 	#f2py --fcompiler=$(F2PY_COMP) --f90flags='$(F90FLAGS)'  $(F2PYOPT) -c $(LDLIBS) -m $(MODS) $(SRCFILES)
 	#### mv $(MODS).*.so $(MODS).so
 	#cp $(MODS).so ..
-	f2py3 --fcompiler=$(F2PY_COMP) --f90flags='$(F90FLAGS)'  $(F2PYOPT) -c $(LDLIBS) -m $(MODS)3 $(SRCFILES)
+	f2py --fcompiler=$(F2PY_COMP) --f90flags='$(F90FLAGS)'  $(F2PYOPT) -c $(LDLIBS) -m $(MODS)3 $(SRCFILES)
 	mv $(MODS)3.*.so $(MODS)3.so
 	cp $(MODS)3.so ..
 

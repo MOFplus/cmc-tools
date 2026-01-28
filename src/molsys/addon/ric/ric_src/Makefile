@@ -22,4 +22,4 @@ SRC= ric_common.f90 \
      ric.f90 \
 
 all:
-	f2py3 --fcompiler=$(F2PY_COMP) --f90flags='$(F90FLAGS)'  $(F2PYOPT) -c $(LDLIBS) -m $(MOD) $(SRC) $(LAPACK)
+	f2py --fcompiler=$(F2PY_COMP) --f90flags='$(F90FLAGS)'  $(F2PYOPT) -c $(LDLIBS) -m $(MOD) $(SRC) $(LAPACK)

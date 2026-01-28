@@ -130,36 +130,64 @@ def rotate_by_triple(xyz, triple):
 def rotate_random(v):
     return apply_mat(quat_to_mat(random_quat()),v)
 
+# RS 2025 .. seems like all these mpi routines are wrong .. not exactly sure why 
 
-def moi2(rs, ms=None):
-    """Moment of inertia"""
-    if ms is None: ms = numpy.ones(len(rs))
-    else: ms = numpy.asarray(ms)
-    rs = numpy.asarray(rs)
-    N = rs.shape[1]
-    # Matrix is symmetric, so inner/outer loop doesn't matter
-    return [[(ms*rs[:,i]*rs[:,j]).sum()/ms.sum()
-             for i in range(N)] for j in range(N)]
+# def moi2(rs, ms=None):
+#     """Moment of inertia"""
+#     if ms is None: ms = numpy.ones(len(rs))
+#     else: ms = numpy.asarray(ms)
+#     rs = numpy.asarray(rs)
+#     N = rs.shape[1]
+#     # Matrix is symmetric, so inner/outer loop doesn't matter
+#     return [[(ms*rs[:,i]*rs[:,j]).sum()/ms.sum()
+#              for i in range(N)] for j in range(N)]
 
-def moi(rs,ms=None):
-    if ms is None: ms = numpy.ones(len(rs))
-    else: ms = numpy.asarray(ms)
-    rs = numpy.asarray(rs)
+# def moi(rs,ms=None):
+#     if ms is None: ms = numpy.ones(len(rs))
+#     else: ms = numpy.asarray(ms)
+#     rs = numpy.asarray(rs)
 
-    Ixx = (ms* (rs[:,1]*rs[:,1] + rs[:,2]*rs[:,2])).sum()
-    Iyy = (ms* (rs[:,0]*rs[:,0] + rs[:,2]*rs[:,2])).sum()
-    Izz = (ms* (rs[:,0]*rs[:,0] + rs[:,1]*rs[:,1])).sum()
-    Ixy =-(ms* rs[:,0] * rs[:,1]).sum()
-    Ixz =-(ms* rs[:,0] * rs[:,2]).sum()
-    Iyz =-(ms* rs[:,1] * rs[:,2]).sum()
-    I = [[Ixx,Ixy,Ixy],[Ixy,Iyy,Iyz],[Ixz,Iyz,Izz]]
-    return numpy.array(I)/ms.sum()
+#     Ixx = (ms* (rs[:,1]*rs[:,1] + rs[:,2]*rs[:,2])).sum()
+#     Iyy = (ms* (rs[:,0]*rs[:,0] + rs[:,2]*rs[:,2])).sum()
+#     Izz = (ms* (rs[:,0]*rs[:,0] + rs[:,1]*rs[:,1])).sum()
+#     Ixy =-(ms* rs[:,0] * rs[:,1]).sum()
+#     Ixz =-(ms* rs[:,0] * rs[:,2]).sum()
+#     Iyz =-(ms* rs[:,1] * rs[:,2]).sum()
+#     I = [[Ixx,Ixy,Ixy],[Ixy,Iyy,Iyz],[Ixz,Iyz,Izz]]
+#     return numpy.array(I)/ms.sum()
+
+
+def moi(xyz, ms=None):
+    if ms is None:
+        ms = numpy.ones(len(xyz))
+    # Center the coordinates at the center of mass
+    m = array(ms)
+    total_mass = m.sum()
+    com = (xyz * m[:, newaxis]).sum(axis=0) / total_mass
+    xyz_centered = xyz - com
+
+    I = zeros((3, 3))
+    for i in range(len(m)):
+        x, y, z = xyz_centered[i]
+        mass = m[i]
+        I[0, 0] += mass * (y**2 + z**2)
+        I[1, 1] += mass * (x**2 + z**2)
+        I[2, 2] += mass * (x**2 + y**2)
+        I[0, 1] -= mass * x * y
+        I[0, 2] -= mass * x * z
+        I[1, 2] -= mass * y * z
+    # The inertia tensor is symmetric
+    I[1, 0] = I[0, 1]
+    I[2, 0] = I[0, 2]
+    I[2, 1] = I[1, 2]
+    return I
+
 
 def pax(rs,ms=None):
     if ms is None: ms = numpy.ones(len(rs))
     else: ms = numpy.asarray(ms)
     rs = numpy.asarray(rs)
-    I = moi(rs,ms=ms)
+    I = moi(rs, ms)
     #print(I)
     eigval, eigvec = numpy.linalg.eigh(I)
     return eigval,eigvec

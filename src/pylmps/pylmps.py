@@ -145,6 +145,9 @@ class pylmps(mpiobject):
         self.use_restraints = False
         self.restraints = {}      # dictionary of restraints activated on MIN or MD_init
         self.ref_energy = 0.0 # a reference energy subtracted from epot
+        self._use_efield = False
+        self._use_dfield = False
+        self._average_H_V = False
         # datafuncs
         self.data_funcs = {\
             "xyz"    : self.get_xyz,\
@@ -279,7 +282,7 @@ class pylmps(mpiobject):
         self.lmps.command("fix %s all wall/region nanosphere harmonic %10.3f 0.0 %10.3f" % (fix_name, force, rcutoff))
         return
 
-    def setup(self, mfpx=None, local=True, mol=None, par=None, ff="file", mfp5=None, restart=None, restart_vel=False, restart_ff=True, 
+    def setup(self, mfpx=None, local=True, mol=None, par=None, ff="file", mfp5=None, restart=None, restart_vel=False, restart_ff=True, restart_img=True, 
             logfile = 'none', bcond=None, uff="UFF", use_mfp5=True, reaxff="cho", kspace_style='ewald',
             kspace=True, silent=False, noheader=False, use_newexpot=False, use_old_uff_setup=False,
             pressure_bath_atype=None, decouple_atypes=[], 
@@ -413,10 +416,7 @@ class pylmps(mpiobject):
             if restart is not None:
                 # The mol object should be read from the mfp5 file
                 self.mfp5 = mfp5io.mfp5io(self.mfp5name, ffe=self, restart=restart, hpc_mode=hpc_mode)  
-                if restart_vel is True:
-                    self.mol, restart_vel  = self.mfp5.get_mol_from_system(vel=True, restart_ff=restart_ff)
-                else:
-                    self.mol = self.mfp5.get_mol_from_system(restart_ff=restart_ff) 
+                self.mol, vel, img = self.mfp5.get_mol_from_system(vel=restart_vel, img=restart_img, restart_ff=restart_ff) # vel and img are None if the flags are False
             else:
                 # we need to make a molsys and read it in (in hpc mode only on the master node)
                 if hpc_mode:
@@ -665,10 +665,25 @@ class pylmps(mpiobject):
             #HACK TO NEGATE NEIGHBOR LIST OVERFLOW:
             self.lmps.command("neigh_modify one 2999")
             self.lmps.command("fix acks2 all acks2/gauss 1 %s %s %s maxiter 50000000" % (self.control['cutoff_coul'], cg_tol, acks2_param_file))
+        if "disp" in self.control["kspace_method"]:
+            self.command("kspace_modify force/disp/real 1e-8")
+            self.command("kspace_modify force/disp/kspace 1e-6")
         # compute energy of initial config
-        if restart_vel is not False:
+        if restart is not None and restart_vel:
             # set velocities that have been read from mfp5 file (do not use startup=True in MDinit becasue that will overwrite the velocities again)
-            self.set_vel(restart_vel)
+            self.set_vel(vel)
+            self.pprint ("Velocities have been read from mfp5 stage %s" % restart)
+        if restart is not None and restart_img:
+            # set images that have been read from mfp5 file (this is currently the default)
+            # RS 2025 - at this point it is important to add the current images to the read ones.
+            #           rational: images are updated in lammps only when the neighbor list is rebuilt.
+            #           this means: it is possible that some atoms are already outside the box when xyz is written to restart
+            #           when these atoms are loaded, pbc is enforced and atoms can be wrapped into the box, which means that
+            #           at startup not all images are zero. To account for this we add the current images to the read ones.
+            img_pl = self.get_image()
+            # np.savetxt("debug_initial_images.dat", img_pl)
+            self.set_image(img + img_pl) # add the read in images to the current ones
+            self.pprint ("Images have been read from mfp5 stage %s" % restart)
         self.calc_energy(init=True)
         if not silent:
           self.report_energies()
@@ -1073,6 +1088,13 @@ class pylmps(mpiobject):
         self.lmps.scatter_atoms("v",1,3,np.ctypeslib.as_ctypes(vel))
         return
 
+    def set_image(self, image):
+        """
+        set the image index from a numpy array (int)
+        """
+        self.lmps.scatter_atoms("image",0,3,np.ctypeslib.as_ctypes(image))
+        return  
+
     def set_molid(self, molid):
         """
         set the lammps molid from a numpy array (int)
@@ -1169,17 +1191,17 @@ class pylmps(mpiobject):
             pass
         return cellforce
 
-    def update_mol(self):
+    def update_mol(self, unwrapped=False):
         cell = self.get_cell()
-        xyz  = self.get_xyz() # this is calling lammps gather and must be executed on all nodes
+        xyz  = self.get_xyz(unwrapped=unwrapped) # this is calling lammps gather and must be executed on all nodes
         if self.is_master or (not self.hpc_mode):
             # in hpc mode do this only on the master (only there we have a mol object anyway)
             self.mol.set_cell(cell)
             self.mol.set_xyz(xyz)
         return
 
-    def write(self,fname, partitions=False, **kwargs):
-        self.update_mol()
+    def write(self,fname, partitions=False, unwrapped=False, **kwargs):
+        self.update_mol(unwrapped=unwrapped)
         if partitions:
             # write each partition
             fname = Path(fname)
@@ -1224,8 +1246,11 @@ class pylmps(mpiobject):
         compute numerical force and compare with analytic 
         for debugging
         """
-        self.get_charge()
-        energy, fxyz   = self.calc_energy_force()
+        # BFJ: I think there would be no harm in setting this to True always
+        if self._use_efield or self._use_dfield:
+            energy, fxyz   = self.calc_energy_force(init=True)
+        else:
+            energy, fxyz   = self.calc_energy_force()
         num_fxyz = np.zeros([self.natoms,3],"float64")
         og_xyz = self.get_xyz()
         xyz      = self.get_xyz()
@@ -1235,16 +1260,13 @@ class pylmps(mpiobject):
                 xyz[a,i] += delta
                 self.set_xyz(xyz)
                 ep = self.calc_energy()
-                self.get_charge()
                 ep_contrib = np.array(list(self.get_energy_contribs().values()))
                 xyz[a,i] -= 2*delta
                 self.set_xyz(xyz)
-                self.get_charge()
                 em = self.calc_energy()
                 em_contrib = np.array(list(self.get_energy_contribs().values()))
                 xyz[a,i] = keep
                 num_fxyz[a,i] = -(ep-em)/(2.0*delta)
-                # self.pprint("ep em delta_e:  %20.15f %20.15f %20.15f " % (ep, em, ep-em))
                 print(np.array2string((em_contrib-ep_contrib)/(2.0*delta),precision=2,suppress_small=True))
                 print("atom %d (%s) %d: anal: %12.6f num: %12.6f diff: %12.6f " % (a," ",i,fxyz[a,i],num_fxyz[a,i],( fxyz[a,i]-num_fxyz[a,i])))
         self.set_xyz(og_xyz)
@@ -1670,7 +1692,7 @@ class pylmps(mpiobject):
     def MD_init(self, stage, T = None, p=None, startup = False, startup_seed = 42, ensemble='nve', thermo=None, 
             relax=(0.1,1.), traj=[], rnstep=100, tnstep=100,timestep = 1.0, bcond = None,mttkbcond='tri', 
             colvar = None, mttk_volconstraint="no", log=False, dump=False, append=False, dump_thermo=True, 
-            wrap = True, tchain=3, pchain=3, noise_seed=42, additional_thermo_output=[]):
+            wrap = True, tchain=3, pchain=3, drag=0.0, noise_seed=42, additional_thermo_output=[]):
         """Defines the MD settings
         
         MD_init has to be called before a MD simulation can be performed, the ensemble along with the
@@ -1701,7 +1723,8 @@ class pylmps(mpiobject):
             additional_thermo_output (list, optional): defaults to []: if non-empty, add the thermo columns to the output
             tchain (int, optional): Defaults to 3. Number of chained thermostats
             pchain (int, optional): Defaults to 3. Number of chained thermostats on barostat
-            noise_ssed (int, optional): Defaults to 42. Random seed used for white noise in csvr thermostat
+            drag (float, optional): Defaults to 0.0. Drag factor added to thermostat and barostat
+            noise_seed (int, optional): Defaults to 42. Random seed used for white noise in csvr thermostat
         
         Returns:
             None: None
@@ -1773,7 +1796,7 @@ class pylmps(mpiobject):
                 i_etot = thermo_style.index("etotal")
                 thermo_style.insert(i_etot+1, "ecouple")
                 thermo_style.insert(i_etot+2, "econserve")
-                self.lmps.command('fix %s all nvt temp %12.6f %12.6f %i tchain %i' % (stage,T1,T2,conv_relax*relax[0], tchain))
+                self.lmps.command('fix %s all nvt temp %12.6f %12.6f %i tchain %i drag %12.6f' % (stage,T1,T2,conv_relax*relax[0], tchain, drag))
                 self.md_fixes = [stage]
             else: 
                 raise NotImplementedError
@@ -1785,8 +1808,8 @@ class pylmps(mpiobject):
                 i_etot = thermo_style.index("etotal")
                 thermo_style.insert(i_etot+1, "ecouple")
                 thermo_style.insert(i_etot+2, "econserve")
-                self.lmps.command('fix %s all npt temp %12.6f %12.6f %i %s %12.6f %12.6f %i tchain %i pchain %i' 
-                        % (stage,T1,T2,conv_relax*relax[0],bcond, p1, p2, conv_relax*relax[1], tchain, pchain))
+                self.lmps.command('fix %s all npt temp %12.6f %12.6f %i %s %12.6f %12.6f %i tchain %i pchain %i drag %12.6f' 
+                        % (stage,T1,T2,conv_relax*relax[0],bcond, p1, p2, conv_relax*relax[1], tchain, pchain, drag))
                 self.md_fixes = [stage]
             elif thermo == 'ber':
                 assert bcond != "tri"
@@ -1994,16 +2017,25 @@ class pylmps(mpiobject):
         self.unset_restraint()
         return
 
+    def set_efield(self, field_vect):
+        self._use_efield = True
+        self.add_ename("efield", "f_efield")
+        self.lmps.command(f"fix efield all efield {field_vect[0]} {field_vect[1]} {field_vect[2]}")
+        self.lmps.command("fix_modify efield energy yes")
+        self.lmps.command("fix_modify efield virial yes")
+        return
 
-
-
+    def unset_efield(self):
+        assert self._use_efield == True
+        self.lmps.command("unfix efield")
+        return
 
 ### Johannes constD stuff
 
     def get_reciprocal_cell(self):
         return np.linalg.inv(self.get_cell()).T
 
-    def set_dfield(self,field_vect, field_mask = [True, True, True], 
+    def set_dfield(self, field_vect, field_mask = [True, True, True],
                     ref = None, reduced = False):
         self._use_dfield = True
         r_cell = self.get_reciprocal_cell()
@@ -2042,18 +2074,9 @@ class pylmps(mpiobject):
         self.lmps.command("fix_modify dfield virial yes")
         return
 
- #       for expot, callback_name in self.external_pot:
- #           # run the expot's setup with self as an argument --> you have access to all info within the mol object
- #           expot.setup(self)
- #           fix_id = "expot_"+expot.name
- #           self.add_ename(expot.name, "f_"+fix_id)
- #           self.lmps.command("fix %s all python/invoke 1 post_force %s" % (fix_id, callback_name))
- #           self.lmps.command("fix_modify %s energy yes" % fix_id)
- #           self.pprint("External Potential %s is set up as fix %s" % (expot.name, fix_id))
-
     def unset_dfield(self):
         assert self._use_dfield == True
-        self.lmps.command("unfix Densemble")
+        self.lmps.command("unfix dfield")
         return
 
 
@@ -2134,9 +2157,223 @@ class pylmps(mpiobject):
         return
     
 
+############################################################################################################
+# stuff for partitioned MD on a T vs P grid
+# ############################################################################################################
 
+    def MD_init_partitioned(self, stage, T = None, p=None, startup = False, startup_seed = 42, ensemble='nve', thermo=None, 
+            relax=(0.1,1.), traj=[], rnstep=100, tnstep=100,timestep = 1.0, bcond = None,mttkbcond='tri', 
+            colvar = None, mttk_volconstraint="no", log=False, dump=False, append=False, dump_thermo=True, 
+            wrap = True, tchain=3, pchain=3, drag=0.0, noise_seed=42, average_H_V=None, additional_thermo_output=[]):
+        """Defines the MD settings
+        
+        MD_init has to be called before a MD simulation can be performed, the ensemble along with the
+        necesary information (Temperature, Pressure, ...), but also trajectory writing frequencies are defined here
+        
+        Args:
+            stage (str): name of the stage
+            T (float, optional): Defaults to None. Temperature of the simulation, if List of len 2 LAMMPS will perform
+            a linear ramp of the Temperature
+            p (float or list of floats, optional): Defaults to None. Pressure of the simulation, if List of len 2 Lammps will perform
+            a linear ramp of the Temperature
+            startup (bool, optional): Defaults to False. if True, sample initial velocities from maxwell boltzmann distribution
+            startup_seed (int, optional): Defaults to 42. Random seed used for the initial velocities 
+            ensemble (str, optional): Defaults to 'nve'. ensemble of the simulation, can be one of 'nve', 'nvt' or 'npt'
+            thermo (str, optional): Defaults to None. Thermostat to be utilized, can be 'ber' or 'hoover'
+            relax (tuple, optional): Defaults to (0.1,1.). relaxation times for the Thermostat and Barostat
+            traj (list of strings, optional): Defaults to None. defines what is written to the mfp5 file
+            rnstep (int, optional): Defaults to 100. restart writing frequency
+            tnstep (int, optional): Defaults to 100. trajectory writing frequency
+            timestep (float, optional): Defaults to 1.0. timestep in fs
+            bcond (str, optional): Defaults to None. by default, the bcond defined in setup is used. only if overwritten here as 'iso' (1), 'aniso' (2) or 'tri' (3), this bcond is used.
+            colvar (string, optional): Defaults to None. if given, the Name of the colvar input file. LAMMPS has to be compiled with colvars in order to use it
+            mttk_volconstraint (str, optional): Defaults to 'yes'. if 'mttk' is used as barostat, define here whether to constraint the volume
+            log (bool, optional): Defaults to True. defines if log file is written
+            dump (bool, optional): Defaults to True: defines if an ASCII dump is written
+            append (bool, optional): Defaults to False: if True data is appended to the exisiting stage (TBI)
+            dump_thermo (bool, optional): defaults to True: if True dump the thermo data written to the log file also to the mfp5 dump
+            additional_thermo_output (list, optional): defaults to []: if non-empty, add the thermo columns to the output
+            tchain (int, optional): Defaults to 3. Number of chained thermostats
+            pchain (int, optional): Defaults to 3. Number of chained thermostats on barostat
+            drag (float, optional): Defaults to 0.0. Drag factor added to thermostat and barostat
+            noise_seed (int, optional): Defaults to 42. Random seed used for white noise in csvr thermostat
+        
+        Returns:
+            None: None
+        """
+        # check that we run with partitions
+        assert self.partitions != None,  "Partitions needed"
+        # stage is new and we need to define it and set it up .. the stage gets _pN appended where N is the partition number
+        # NOTE: part_rank is the rank within each partition and part_num the partition number 
+        stage = stage.strip()
+        assert len(stage.split()) == 1, f"'stage' argument may not contain multiple words. Use '_' instead of whitespaces: {stage.replace(' ', '_')}."
+        self.part_stage = stage + "_p%d" % self.part_num
+        # if wished open a specific log file
+        if log:
+            self.lmps.command('log %s/%s.log' % (self.rundir, self.part_stage))
+        if bcond == None: bcond = bcond_map[self.bcond]
+        assert bcond in ['non', 'iso', 'aniso', 'tri']
+        # first specify the timestep in femtoseconds
+        self.lmps.command('timestep %12.6f' % timestep)
+        # the relax values are multiples of the timestep
+        conv_relax = 1000/timestep 
+        # manage output, this is the setup for the output written to screen and log file
+        # build the thermo_style list (sent to to lammps as thermos tyle commend at the end)
+        thermo_style = [self.evars[n] for n in self.enames]
+        thermo_style += [self.evars["epot"]]
+        # this is md .. add some crucial stuff
+        thermo_style += ["ke", "etotal", "temp", "press", "vol"]
+        # generate regular dump (ASCII)
+        if dump is True:
+            if wrap:
+                self.lmps.command('dump %s all custom %i %s.dump id type element x y z' % (self.part_stage+"_dump", tnstep, self.part_stage))
+            else:
+                self.lmps.command('dump %s all custom %i %s.dump id type element xu yu zu' % (self.part_stage+"_dump", tnstep, self.part_stage))
+            plmps_elems = self.ff2lmp.plmps_elems
+            self.lmps.command('dump_modify %s element %s' % (self.part_stage+"_dump", " ".join(plmps_elems)))
+            self.md_dumps.append(self.part_stage+"_dump")
+        # get partition temperature
+        if T is not None:
+            T_part = T[self.part_num]
+        else:
+            T_part = None
+        if p is not None:
+            p_part = p[self.part_num]
+        else:
+            p_part = None
+        # do velocity startup
+        if startup:
+            self.lmps.command('velocity all create %12.6f %d rot yes mom yes dist gaussian' % (T_part,startup_seed))
+        # apply fix
+        if ensemble == 'nve':
+            self.md_fixes = [self.part_stage]
+            self.lmps.command('fix %s all nve' % (self.part_stage))
+        elif ensemble == 'nvt':
+            if thermo == 'ber':
+                self.lmps.command('partition yes %i fix %s all temp/berendsen %12.6f %12.6f %i'% (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0]))
+                self.lmps.command('fix %s_nve all nve' % self.part_stage)
+                self.md_fixes = [self.part_stage, '%s_nve' % self.part_stage]
+            elif thermo == 'csvr':
+                self.lmps.command('partition yes %i fix %s all temp/csvr %12.6f %12.6f %i %d'% (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0], noise_seed))
+                self.lmps.command('fix %s_nve all nve' % self.part_stage)
+                self.md_fixes = [self.part_stage, '%s_nve' % self.part_stage]
+            elif thermo == 'hoover':
+                i_etot = thermo_style.index("etotal")
+                thermo_style.insert(i_etot+1, "ecouple")
+                thermo_style.insert(i_etot+2, "econserve")
+                self.lmps.command('partition yes %i fix %s all nvt temp %12.6f %12.6f %i tchain %i drag %12.6f' % (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0], tchain, drag))
+                self.md_fixes = [self.part_stage]
+            else: 
+                raise NotImplementedError
+        elif ensemble == "npt":
+            # this is NPT so add output of pressure and cell
+            thermo_style += cellpar
+            thermo_style += pressure
+            if thermo == 'hoover':
+                i_etot = thermo_style.index("etotal")
+                thermo_style.insert(i_etot+1, "ecouple")
+                thermo_style.insert(i_etot+2, "econserve")
+                self.lmps.command('partition yes %i fix %s all npt temp %12.6f %12.6f %i %s %12.6f %12.6f %i tchain %i pchain %i drag %12.6f' 
+                        % (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0],bcond, p_part, p_part, conv_relax*relax[1], tchain, pchain, drag))
+                self.md_fixes = [self.part_stage]
+            elif thermo == 'ber':
+                assert bcond != "tri"
+                self.lmps.command('partition yes %i fix %s_temp all temp/berendsen %12.6f %12.6f %i'% (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0]))
+                self.lmps.command('partition yes %i fix %s_press all press/berendsen %s %12.6f %12.6f %i'% (self.part_num+1,self.part_stage,bcond,p_part,p_part,conv_relax*relax[1]))
+                self.lmps.command('fix %s_nve all nve' % self.part_stage)
+                self.md_fixes = ['%s_temp' % self.part_stage,'%s_press' % self.part_stage , '%s_nve' % self.part_stage]
+            elif thermo == 'csvr':
+                assert bcond != "tri"
+                self.lmps.command('partition yes %i fix %s_temp all temp/csvr %12.6f %12.6f %i %d'% (self.part_num+1,self.part_stage,T_part,T_part,conv_relax*relax[0], noise_seed))
+                self.lmps.command('partition yes %i fix %s_press all press/berendsen %s %12.6f %12.6f %i'% (self.part_num+1,self.part_stage,bcond,p_part,p_part,conv_relax*relax[1]))
+                self.lmps.command('fix %s_nve all nve' % self.part_stage)
+                self.md_fixes = ['%s_temp' % self.part_stage,'%s_press' % self.part_stage , '%s_nve' % self.part_stage]
+            else:
+                raise NotImplementedError
+        else:
+            self.pprint('WARNING: no ensemble specified (this means no fixes are set!), continuing anyway! ')
+            #raise NotImplementedError
+        if colvar is not None:
+            self.lmps.command("fix col all colvars %s" %  colvar)
+            self.md_fixes.append("col")
+        if average_H_V is not None:
+            self.fix_average_H_V(average_H_V)
+            thermo_style += ["enthalpy", "f_aveH", "v_errH", "f_aveV", "v_errV"]
+        # now define what scalar values should be written to the log file
+        thermo_style += additional_thermo_output
+        thermo_style += ["spcpu"]
+        thermo_style_string = "thermo_style custom step " + " ".join(thermo_style)
+        self.lmps.command(thermo_style_string)
+        # now the thermo_style is defined and the length is known so we can setup the mfp5 dump  
+        return
 
-
+    def MD_run_partitioned(self, nsteps, printout=100, clear_dumps_fixes=True):
+        # set restraints if there are any
+        self.set_restraints()
+        #assert len(self.md_fixes) > 0
+        self.lmps.command('thermo %i' % printout)
+        # lammps can not do runs with larger than 32 bit integer steps -> do consecutive calls
+        int32max = 2147483648
+        if nsteps > int32max:
+            nbig = nsteps//int32max
+            nrem = nsteps%int32max
+            for i in range(nbig):
+                self.lmps.run('run %i' % int32max)
+            self.lmps.run('run %i' % nrem)
+        else: 
+            self.lmps.command('run %i' % nsteps)
+        if clear_dumps_fixes:
+            for fix in self.md_fixes:
+                self.lmps.command('partition yes %i unfix %s' % (self.part_num+1, fix))
+            self.md_fixes = []
+            for dump in self.md_dumps:
+                self.lmps.command('undump %s' % dump)
+            self.md_dumps = []
+            self.lmps.command('reset_timestep 0')
+        self.unset_restraints()
+        return
+    
+    def fix_average_H_V(self, frequency):
+        self.lmps.command(f'variable avefreq equal {frequency}')
+        self.lmps.command('variable H equal enthalpy')
+        self.lmps.command('fix aveH all ave/time 1 1 ${avefreq} v_H ave running')
+        self.lmps.command('variable aveH equal f_aveH')
+        self.lmps.command('variable deltaH equal "(enthalpy - f_aveH)^2"')
+        self.lmps.command('fix varH all ave/time 1 1 ${avefreq} v_deltaH ave running')
+        self.lmps.command('variable stdH equal "sqrt(f_varH)"')
+        self.lmps.command('variable errH equal "v_stdH/sqrt(elapsed/v_avefreq+1e-99)"')
+        self.lmps.command('variable V equal vol')
+        self.lmps.command('fix aveV all ave/time 1 1 ${avefreq} v_V ave running')
+        self.lmps.command('variable aveV equal f_aveV')
+        self.lmps.command('variable deltaV equal "(vol - f_aveV)^2"')
+        self.lmps.command('fix varV all ave/time 1 1 ${avefreq} v_deltaV ave running')
+        self.lmps.command('variable stdV equal "sqrt(f_varV)"')
+        self.lmps.command('variable errV equal "v_stdV/sqrt(elapsed/v_avefreq+1e-99)"')
+        self.md_fixes.append("aveH")
+        self.md_fixes.append("varH")
+        self.md_fixes.append("aveV")
+        self.md_fixes.append("varV")
+        return
+    
+    def get_average_H_V(self):
+        """ 
+        get the average enthalpy and volume
+        """
+        aveH = self.lmps.extract_variable("aveH", None, 0)
+        aveV = self.lmps.extract_variable("aveV", None, 0)
+        stdH = self.lmps.extract_variable("stdH", None, 0)
+        stdV = self.lmps.extract_variable("stdV", None, 0)
+        return aveH, stdH, aveV, stdV
+    
+    def clear_dumps_fixes(self):
+        for fix in self.md_fixes:
+            self.lmps.command('partition yes %i unfix %s' % (self.part_num+1, fix))
+            self.md_fixes = []
+        for dump in self.md_dumps:
+            self.lmps.command('undump %s' % dump)
+            self.md_dumps = []
+            self.lmps.command('reset_timestep 0')
+        return
 
 
 

@@ -253,6 +253,8 @@ if [ "${REAL_FILE: -5}" == ".mfpx" ]; then
     if $(grep "type" $REAL_FILE | grep -q "topo") ; then
         echo "topo file detected"
         grep -v \# $REAL_FILE | awk '{$6=0; for(i=1;i<=NF;i++) {gsub(/\/.*$/, "", $i)}; print}' > $TEMP_FILE && $COMMAND $TEMP_FILE ${@//$REAL_FILE/}
+    elif $(grep -q "charge" $REAL_FILE) ; then
+        grep -v \# $REAL_FILE | awk '{$6="0"; $7=""; $8=""; $9=""; print}' > $TEMP_FILE && $COMMAND $TEMP_FILE ${@//$REAL_FILE/}
     else
         grep -v \# $REAL_FILE | awk '{$6="0"; $7=""; $8=""; print}' > $TEMP_FILE && $COMMAND $TEMP_FILE ${@//$REAL_FILE/}
     fi

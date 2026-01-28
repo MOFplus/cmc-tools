@@ -127,12 +127,14 @@ class Timer(object):
         if not is_master: return
         rep = self._report()
         def rep2str(rep,elapsed,level=0):
+            if elapsed < 1e-10:
+                elapsed = 1e-10 # a hack to prevent division by zero if there is no elapsed time
             replist = []
             repstr = "| " + level*indent
             repstr += ("{:<"+str(39-level*len(indent))+"}").format(rep["desc"])
-            repstr += " |{:<10}|".format("-"*int(rep["elapsed"]*10/self.elapsed))
+            repstr += " |{:<10}|".format("-"*int(rep["elapsed"]*10/elapsed))
             repstr += " {:>7}s  {:5.1f}%  {:5.1f}% |".format(
-                "{:.6g}".format(rep["elapsed"])[:7],rep["elapsed"]/elapsed*100,rep["elapsed"]/self.elapsed*100
+                "{:.6g}".format(rep["elapsed"])[:7],rep["elapsed"]/elapsed*100,rep["elapsed"]/elapsed*100
                 )
             # HACK: There is a small error happening when truncating the elapsed time to a width of 7 characters without rounding here
             # HACK: No indication yet for running timers

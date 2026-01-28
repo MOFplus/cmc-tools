@@ -5,7 +5,7 @@ import os
 import subprocess
 
 from .pylmps import pylmps
-from .expot_base import expot_base, expot_test, expot_ase, expot_ase_turbomole, expot_xtb
+from .expot_base import expot_base, expot_test, expot_ase, expot_xtb
 
 def git_revision_hash():
     wrk_dir = os.getcwd()

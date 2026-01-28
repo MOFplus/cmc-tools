@@ -93,11 +93,13 @@ class atomtyper:
                 self.atoms.append(atom(self.elements[i], list(map(self.elements.__getitem__, self.cnct[i]))))
         return
 
-    def __call__(self,rules = 2): # depending on element
+    def __call__(self, rules=2, fix=False): # depending on element
         """
         0 : only elements
         1 : element+coordnumber
         2 : element+coordnumber+bonded atoms
+        
+        fix: boolen, if True only fix atom types with a "*"
         """
         # create a rule dictionary
         self.atypes = []
@@ -105,10 +107,15 @@ class atomtyper:
             rules = dict(list(zip(self.avail_e, len(self.avail_e) * [rules])))
         self.rules = rules
         # loop over all atoms
+        orig_atypes = copy.deepcopy(self.mol.atypes)
         for i,a  in enumerate(self.atoms):
             type = self.apply_rules(a)
             a.set_type(type)
             self.atypes.append(a.get_type())
+        if fix:
+            for i in range(self.natoms):
+                if not "*" in orig_atypes[i]:
+                    self.atypes[i] = orig_atypes[i]
         self.mol.atypes = self.atypes
         return
 

@@ -151,6 +151,7 @@ struct mfpx_file{
     int* conn_from;
     int* conn_to;
     int nbonds;
+    int charge;
 };
 /*  ********** DESCRIPTION ********** 
 * file_id holds the reference to the open file
@@ -161,6 +162,8 @@ struct mfpx_file{
     0: xyz type
     1: bb type
     2: topo type
+
+    charge: 0 no charge, 1 charge after xyz (used as offset, too)
 
 */
 
@@ -294,6 +297,14 @@ int parse_header_line(struct mfpx_file* file, const char *line){
             printf("ga = %f\n",file->cellparams[5]); fflush(stdout);
         #endif
     }
+    // RS 2025 added option for charges in mfpx file -> charge keyword means there is a charge column after xyz
+    s = strstr(line,"# charge ");
+    if (s != NULL){
+        #ifdef DEBUG
+            printf("charge info detected ... \n"); fflush(stdout);
+        #endif
+        file->charge=1;
+    }
     return 0;
 }
 
@@ -306,6 +317,7 @@ int mfpx_get_natoms(struct mfpx_file* file, int* natoms){
     int header_count = 0;
     int done = 0;
     file->is_periodic=0;
+    file->charge=0;
     while (done == 0) {
         read = getline(&line, &len, file->file_id);
         if (read == -1){ //terminate if line could not be red
@@ -352,6 +364,7 @@ int read_mfpx_structure(void *_file, int *optflags,molfile_atom_t *atoms) {
 	*optflags =  MOLFILE_ATOMICNUMBER | MOLFILE_CHARGE; 
 	struct mfpx_file* file=_file;
 	int natoms = file->natoms;
+    int coff = file->charge;
 
     file->xyz       = malloc(natoms*3*sizeof(float));
     file->conn_from = malloc(natoms*24*sizeof(int));
@@ -395,18 +408,23 @@ int read_mfpx_structure(void *_file, int *optflags,molfile_atom_t *atoms) {
             if (j >= 2 && j <=4){
                 file->xyz[3*i+(j-2)] = atof(pch);
             }
-            if (j == 5){
+            if (file->charge == 1){
+                if (j == 5){
+                    atom->charge = atof(pch);
+                }
+            }
+            if (j == (5+coff)){
                 strncpy(atom->type,pch,16*sizeof(char));
                 //printf("%f %f %f", xyz[3*i],xyz[3*i+1],xyz[3*i+2]);
             }
             if (file->mfpxtype == 0){           
-                if (j == 6){
+                if (j == (6+coff)){
                     strncpy(atom->resname,pch,8*sizeof(char));
                 }
-                if (j == 7){
+                if (j == (7+coff)){
                     atom->resid=atoi(pch);
                 }
-                if (j > 7){
+                if (j > (7+coff)){
                     // this is a conn entry!
                     jidx = atoi(pch);
                     // we have to prevent double counting here! 

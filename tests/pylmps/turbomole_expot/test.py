@@ -32,8 +32,8 @@ calc = Turbomole(**params)
 m_ase.calc = calc
 # instantiate the pylmps object
 pl = pylmps.pylmps("ASE")
-# instantiate the external potential expot_ase_turbomole
-ep = pylmps.expot_ase_turbomole(m_ase,[i for i in range(m.natoms)])
+# instantiate the external potential expot_ase
+ep = pylmps.expot_ase(m_ase,[i for i in range(m.natoms)])
 # we need to register the objects callback as a global function
 callback = ep.callback
 # now add the expot object together with the name of the global callback
@@ -42,7 +42,7 @@ pl.setup(local=True,mol=m,ff="ase", bcond=0, kspace=False, origin="center")
 # A few basic tests
 pl.MIN(0.5)
 pl.calc_energy(init=True)
-ref_energy = -72576.28293080
+ref_energy = -72576.28294178
 assert (abs(ref_energy-pl.energy))<1.0e-6
 fxyz, num_fxyz = pl.calc_numforce()
 assert np.sqrt(np.mean((fxyz-num_fxyz)**2.0))<1.0e-3

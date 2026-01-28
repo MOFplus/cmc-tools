@@ -448,9 +448,15 @@ class ff2lammps(base):
         if self._mol.charge.method == None:
             if "chargegen" in self._settings:
                 if self._settings["chargegen"] == "topoqeq":
-                    assert "topoqeq_par" in self._settings, "topoqeq parameter file is missing"
-                    self.pprint("ff2lammps: generating charges from topoqeq using params from %s" % self._settings["topoqeq_par"])
-                    charges = self._mol.charge.get_from_topoqeq(qeq_parfile=self._settings["topoqeq_par"])
+                    topoqeq_parfile = None
+                    if "topoqeq_par" in self._settings:
+                        topoqeq_parfile = self._settings["topoqeq_par"]
+                    if topoqeq_parfile is None:
+                        self.pprint("ff2lammps: no topoqeq parameter file given, using params from ff addon")
+                        charges = self._mol.charge.get_from_topoqeq()
+                    else:
+                        self.pprint("ff2lammps: generating charges from topoqeq using params from %s" % self._settings["topoqeq_par"])
+                        charges = self._mol.charge.get_from_topoqeq(from_ff=False, qeq_parfile=self._settings["topoqeq_par"])
                 elif self._settings["chargegen"] == "ff":
                     charges = self._mol.charge.get_from_ff()
                 elif self._settings["chargegen"] == "zero":
@@ -614,6 +620,15 @@ class ff2lammps(base):
                             pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2)) % (i+1,j+1, hybrid_style, eps, sig))
                     else:
                         raise ValueError("unknown potential")
+                elif self._settings["vdwtype"]=="lj_long":
+                    if vdw[0] == "lj":
+                        sig, eps = vdw[1]
+                        if comment:
+                            pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2) + "   # %s <--> %s") % (i+1,j+1, hybrid_style, eps, sig, ati, atj))
+                        else:
+                            pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2)) % (i+1,j+1, hybrid_style, eps, sig))
+                    else:
+                        raise ValueError("unknown potential")
                 elif self._settings["vdwtype"]=="lj_mdf":
                     if vdw[0] == "lj":
                         sig, eps = vdw[1]
@@ -629,6 +644,23 @@ class ff2lammps(base):
                         else:
                             if hybrid_style != "":
                                 pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2)) % (i+1,j+1, "lj/mdf", eps, sig))
+                                pstrings.append(("pair_coeff %5d %5d %s ") % (i+1,j+1, hybrid_style))
+                            else:
+                                pstrings.append(("pair_coeff %5d %5d " + self.parf(2)) % (i+1,j+1, eps, sig))
+                    else:
+                        raise ValueError("unknown potential")
+                elif self._settings["vdwtype"]=="lj_sf":
+                    if vdw[0] == "lj":
+                        sig, eps = vdw[1]
+                        if comment:
+                            if hybrid_style != "":
+                                pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2) + "   # %s <--> %s") % (i+1,j+1, "lj/smooth/linear", eps, sig, ati, atj))
+                                pstrings.append(("pair_coeff %5d %5d %s " + "   # %s <--> %s") % (i+1,j+1, hybrid_style, ati, atj))
+                            else:
+                                pstrings.append(("pair_coeff %5d %5d " + self.parf(2) + "   # %s <--> %s") % (i+1,j+1, eps, sig, ati, atj))
+                        else:
+                            if hybrid_style != "":
+                                pstrings.append(("pair_coeff %5d %5d %s " + self.parf(2)) % (i+1,j+1, "lj/smooth/linear", eps, sig))
                                 pstrings.append(("pair_coeff %5d %5d %s ") % (i+1,j+1, hybrid_style))
                             else:
                                 pstrings.append(("pair_coeff %5d %5d " + self.parf(2)) % (i+1,j+1, eps, sig))
@@ -702,10 +734,14 @@ class ff2lammps(base):
             pair_style_vdw = "lj/cut"                    # is this right? what does it mean?
         elif self._settings["vdwtype"] == "lj_mdf":
             pair_style_vdw = "lj/mdf"                    # this is right. it means nothing. nothing means anything.
+        elif self._settings["vdwtype"] == "lj_long":
+            pair_style_vdw = "lj/long"                    # this is wrong. everything is wrong.
+        elif self._settings["vdwtype"] == "lj_sf":
+            pair_style_vdw = "lj/smooth/linear"                    # this is wrong. everything is wrong.
         else:
             raise NotImplementedError
         
-        if pair_style_coul == "lj/cut" and self._settings["tailcorr"]:
+        if pair_style_vdw == "lj/cut" and self._settings["tailcorr"]:
             pair_modify = "pair_modify tail yes"
         
         # set coul type
@@ -740,7 +776,7 @@ class ff2lammps(base):
             pair_style = pair_style_vdw
 
         # check if this pair style is allowed (exists in lammps_pots dictionary pair_styles)
-        assert pair_style in lammps_pots.allowed_pair_styles
+        assert pair_style in lammps_pots.allowed_pair_styles, "pair style %s not allowed in lammps_pots" % pair_style
         cutoffs = [("%10.5f" % self._settings[c]) for c in lammps_pots.allowed_pair_styles[pair_style] if self._settings[c] != None]
         cutoffs = " ".join(cutoffs)
 
@@ -772,6 +808,15 @@ class ff2lammps(base):
             else:
                 f.write("\npair_style %s %s\n" % (pair_style_vdw, cutoffs_vdw))
             hybrid_flag = True
+        elif pair_style_vdw == "lj/smooth/linear":
+            hybr_ps = pair_style_coul
+            hparams = [("%10.5f" % self._settings[c]) for c in lammps_pots.allowed_pair_styles[pair_style] if self._settings[c] != None]
+            hparams_coul = " ".join(hparams[1:])
+            if pair_style_coul != "":
+                f.write("\npair_style hybrid/overlay %s %s %s %s\n" % (pair_style_vdw, hparams[0], pair_style_coul, hparams_coul))
+            else:
+                f.write("\npair_style %s %s\n" % (pair_style_vdw, cutoffs_vdw))
+            hybrid_flag = True
         if self.par["reapr"] != {}:
             for par_descriptor, (pot_name, rea_params) in self.par["reapr"].items():
                 lammps_name = self.lammps_pots.rics["reapr"][pot_name].lammps_name
@@ -797,7 +842,10 @@ class ff2lammps(base):
         if hybrid_flag is True:
             f.write("\n") # end the hybrid/overlay line
         else:
-            f.write("\npair_style %s %s\n" % (pair_style, cutoffs))
+            if self._settings["vdwtype"] == "lj_long":
+                f.write("\npair_style %s long long %s\n" % (pair_style, cutoffs.split()[0]))
+            else:
+                f.write("\npair_style %s %s\n" % (pair_style, cutoffs))
         
         if len(pair_extra) > 0 and not noheader:
             f.write("\n %s \n\n" % pair_extra)

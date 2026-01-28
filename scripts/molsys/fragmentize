@@ -5,6 +5,11 @@ import molsys
 import sys
 import os
 
+keep_atypes = False
+if len(sys.argv) == 3:
+    if sys.argv[2] == "keep_atypes":
+        keep_atypes = True
+
 name = sys.argv[1]
 if name == "all":
     print ("fragmentizing all mfpx files in the current folder ... beware")
@@ -16,8 +21,9 @@ frag = molsys.util.fragmentizer()
 for name in mollist:
     m = molsys.mol()
     m.read(name)
-    at = molsys.util.atomtyper(m)
-    at()
+    if not keep_atypes:
+        at = molsys.util.atomtyper(m)
+        at()
     frag(m, verbose=True)
     m.write(name)
 

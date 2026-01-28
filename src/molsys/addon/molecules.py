@@ -4,6 +4,7 @@ import numpy
 import copy
 import molsys.mol
 from molsys.addon import base
+from tqdm import tqdm
 
 import os
 import tempfile
@@ -49,7 +50,7 @@ class mgroup:
             self.nmols = self.parent_mol.molid.max()+1
             # since we do not know molnames if this is a pure mfpx file we give them for the time being all the name of the parent mol obejct
             self.molnames = [self.parent_mol.name]
-            self.moltypes = self.nmols*[0]
+            self.moltypes = int(self.nmols)*[0] # BFJ: without int conversion this can end up as a gt propertyarray 
             # generate mols (list of lists)
             for i in range(self.nmols):
                 self.mols.append([])  # nmols*[[]] does not work -> side effect
@@ -249,6 +250,7 @@ class molecules(base):
         
         # if pack is True we first try to use packmol to generate proper xyz coords and keep them.        
         if pack:
+            randomize_xyz = False # set this to False since we use packmol
             assert self._mol.get_bcond() < 3
             if sphere == None:
                 # assume pydlpoly boundary conditions (orig in the center of box) -- this is what we get from MOF+ 
@@ -297,7 +299,9 @@ class molecules(base):
             with open("pack.inp", "w") as packf:
                 packf.write(packmolf)
             # now try to execute packmol
+            print ("Executing packmol ...")
             os.system("packmol <pack.inp > pack.out")
+            print ("Packmol finished")
             # check if final.xyz has been generated ... if not it probably failed becasue packmol is not installed or other reasons
             if os.path.isfile("final.xyz"):
                 tempm = molsys.mol.from_file("final.xyz")
@@ -307,7 +311,7 @@ class molecules(base):
                 #for f in remove_files:
                  #   os.remove(tmpd+"/"+f)
                 #os.rmdir(tmpd)
-                print(tmpd)
+                print("Temporary files are in %s" % tmpd)
                 logger.info("Molecules packed with packmol")
             else:
                 self._mol.pprint("packing with packmol failed. Temporary files at %s" % tmpd)
@@ -318,7 +322,8 @@ class molecules(base):
         from molsys.addon.ff import ic
         # add newmol to parent mol
         offset = self._mol.natoms -1
-        for i in range(nmols):
+        print ("Adding %d molecules of type %s to system" % (nmols, newmol.name))
+        for i in tqdm(range(nmols)):
             if randomize_xyz:
                 rndxyz = self._mol.get_xyz_from_frac(numpy.random.uniform(0,1,(3,)))
                 self._mol.add_mol(newmol,translate=rndxyz)
@@ -331,12 +336,14 @@ class molecules(base):
         if "ff" in self._mol.loaded_addons:
             assert "ff" in newmol.loaded_addons, "Added molecule object needs to have a ff setup"
             ### par update
+            print ("Found a force field in parent mol .. updating ff parameters")
             for k in newmol.ff.par.keys():
                 self._mol.ff.par[k].update(newmol.ff.par[k])
             logger.info('ff information of molecule %s read in' % (newmol.name,))
             ### ric_type update
             temp_ric_type = copy.copy(newmol.ff.ric_type)
             for k in temp_ric_type.keys():
+                print ("Updating ric type %s" % (k,))
                 for moli in range(nmols):    
                     for i in range(len(temp_ric_type[k])):
                         # get attributes of ric

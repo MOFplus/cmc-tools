@@ -57,6 +57,8 @@ class obabel:
         self._cansmiles = None
         self._ff = "uff"
         self.pff = None
+        # get atomIDs (differnt from indices)
+        self.atomIDs = [a.OBAtom.GetId() for a in self.pybmol.atoms]
         return
 
     @property
@@ -215,18 +217,68 @@ class obabel:
         return
    
     def check_chirality(self):
-        centers = []
-        is_chiral = False
-        m = self.pybmol.OBMol 
+        # a helper to get atomIds coords:
+        def _get_coords_from_ID(atomID):
+            idx = self.atomIDs.index(atomID)
+            return self._mol.xyz[idx]
+        ccenters = {}
+        abs_config = {}
+        m = self.pybmol.OBMol
         facade = ob.OBStereoFacade(m)
         for iat in range(1,m.NumAtoms()+1):
-            tetstereo = facade.GetTetrahedralStereo(m.GetAtom(iat).GetId())
+            id = m.GetAtom(iat).GetId()
+            tetstereo = facade.GetTetrahedralStereo(id)
             if tetstereo is not None:
                 config = tetstereo.GetConfig()
-            local_check = m.GetAtom(iat).IsChiral()
-            centers.append(local_check)
-            is_chiral = is_chiral or (local_check)
-        return is_chiral, centers 
+                ccenters[iat] = [id, config.from_or_towards, config.refs]
+                A = _get_coords_from_ID(config.refs[0])
+                B = _get_coords_from_ID(config.refs[1])
+                C = _get_coords_from_ID(config.refs[2])
+                D = _get_coords_from_ID(config.from_or_towards)
+                # compute sign of volume of tetrahedron
+                M = np.vstack([A - D, B - D, C - D])
+                vol = np.linalg.det(M)
+                abs_config[iat] = "R" if vol > 0 else "S"
+        return ccenters, abs_config
+    
+    # def calc_CIP_prio(self, idx):
+    #     """compute the CIP prios of the tetrahedral neighbors
+
+    #     Args:
+    #         idx (int): atom index
+
+    #     Returns:
+    #         list of atom idices in order of CIP prio: last is lowest
+    #     """
+    #     from graph_tool import Graph
+    #     from molsys.util import elems
+    #     g = Graph(directed=False)
+    #     g.add_vertex(self._mol.natoms)
+    #     g.add_edge_list(self._mol.ctab)
+    #     g.vp.anum = g.new_vertex_property("int")
+    #     for v in g.vertices():
+    #         g.vp.anum[v] = elems.number[self._mol.elems[int(v)]]
+    #     nei1 = [int(n) for n in g.get_out_neighbors(idx)]
+    #     lev1 = [g.vp.anum[n] for n in nei1]
+    #     prio1 = np.argsort(lev1)
+    #     # check if we need a second level
+    #     skip = []
+    #     for an in lev1:
+    #         if an not in skip and lev1.count(an) > 1:
+    #             print ("secondlevel for atom number %d" % an)
+    #             # need second level
+    #             dups = [i for i,v in enumerate(lev1) if v == an]
+    #             skip.append(an)
+    #             nei2 = [nei1[i] for i in dups]
+    #             lev2 = []
+    #             for j in nei2:
+    #                 lev2.append([g.vp.anum[n] for n in g.get_out_neighbors(j) if n != idx])
+    #             print (dups, nei2, lev2)
+
+    #     print (nei1, lev1, prio1)
+
+            
+
 
     ################ force field stuff ##############################
 

@@ -156,7 +156,7 @@ class fragments:
         return
 
     @timer("make_frag_conn")
-    def make_frag_graph(self, add_atom_map=False, phenyl_like=["naph"]):
+    def make_frag_graph(self, add_atom_map=False, phenyl_like=["naph", "carbazol"]):
         """
         generate a graph of the frag_conn in analogy to the graph addon on the molecular level
         using the graph addons util_graph method
@@ -408,8 +408,9 @@ class fragments:
         for v in g.vertices():
             print ("vertex %d (%s) with CN %d" % (v, g.vp.type[v], v.out_degree()))
 
-    def find_subgraph(self, name, subg):
-        subs = self._mol.graph.find_subgraph(self.fgraphs[name], subg)
+    # keep order by default ... does it speed up without?
+    def find_subgraph(self, name, subg, keep_order=True):
+        subs = self._mol.graph.find_subgraph(self.fgraphs[name], subg, keep_order=keep_order)
         return subs
 
     def fgraph_to_mol(self, name, elemmap, subg=None):

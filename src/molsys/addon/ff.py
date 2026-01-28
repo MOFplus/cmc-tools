@@ -208,6 +208,23 @@ class ric:
                 raise ValueError("The rics provided do not match the mol object!")
         return
 
+    def sort_bond(self, idx):
+        """
+        Method used for sorting bonds, according to their
+        aftypes.
+        
+        Args:
+            idx (list): list of indices defining a bond
+
+        Returns:
+            list: sorted list of indeces defining the bond
+        """
+        if self.aftypes[idx[0]] > self.aftypes[idx[1]]:
+            idx.reverse()
+        elif idx[0] > idx[1] and self.aftypes[idx[0]] == self.aftypes[idx[1]]:
+            idx.reverse()
+        return idx
+
 
     @timer("find bonds")
     def find_bonds(self):
@@ -221,7 +238,7 @@ class ric:
         for a1 in range(self.natoms):
             for a2 in self.conn[a1]:
                 if a2 > a1:
-                    if self.aftypes[a1] < self.aftypes[a2]: 
+                    if self.aftypes[a1] <= self.aftypes[a2]: 
                         bonds.append(ic([a1, a2]))
                     else:
                         bonds.append(ic([a2, a1]))
@@ -438,10 +455,10 @@ class ric:
         """
         for d in self.dih:
             if d.ring:
-                # bonds are sorted via atom indices
-                self.bnd[self.bnd.index(sorted(d[0:2]))].ring = d.ring
-                self.bnd[self.bnd.index(sorted(d[1:3]))].ring = d.ring
-                self.bnd[self.bnd.index(sorted(d[2:4]))].ring = d.ring
+                # bnds are sorted also by aftypes
+                self.bnd[self.bnd.index(self.sort_bond(d[0:2]))].ring = d.ring
+                self.bnd[self.bnd.index(self.sort_bond(d[1:3]))].ring = d.ring
+                self.bnd[self.bnd.index(self.sort_bond(d[2:4]))].ring = d.ring
                 # angles are sorted in respect to aftypes, we have to
                 # check both possibilities
                 ang = self.sort_angle(d[0:3])              
@@ -710,6 +727,8 @@ class ff(base):
            for i, at in enumerate(self.ric_type["vdw"]):
                at.molid = self._mol.graph.molg.vp.molid[i]
                self._mol.molid = self._mol.graph.molg.vp.molid.get_array()
+        # topoqeq parameter are currently stored in a simple dict with key = atype and val = [sigma, Jii, Xi]
+        self.topoqeq_par = {}
         logger.info("initialized the ff addon")
         self.par.FF ="FF"
         return
@@ -753,7 +772,7 @@ class ff(base):
     def report(self):
         self.timer.report()
 
-    def fixup_refsysparams(self, var_ics = ["bnd", "ang", "dih", "oop"], cross_terms = []):
+    def fixup_refsysparams(self, var_ics = ["bnd", "ang", "dih", "oop"], cross_terms = [], refsysname=None):
         """
         Initialize the params for further fitting
         
@@ -798,6 +817,12 @@ class ff(base):
         # cross_types["ang"] = [["strbnd"],[6]]
         # cross_types["dih"] = [["mbt","ebt","at","aat","bb13"],[4,8,8,3,3]]
         # 
+        # refsysname must be set, if it is not a param of this method we use the name of the mol object
+        if refsysname is None:
+            self.refsysname = self._mol.name
+        else:
+            self.refsysname = refsysname
+
         for ic in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
             pvn_count  = 0
             ric = self.ric_type[ic]
@@ -1033,23 +1058,6 @@ class ff(base):
             self.par["cha"][self.parind["cha"][i][0]][1][1] = sig
         return
     
-    def assign_zero(self, refname="xxx"):
-        """generate all ff data structures with zero paramters
-        """
-        self.refsysname = refname
-        self.ric.find_rics()
-        self._init_data()
-        self._init_pardata("ZERO-FF")
-        # generate internal atypes with fragname
-        self.aftypes = []
-        for i, a in enumerate(self._mol.get_atypes()):
-            self.aftypes.append(aftype(a, self._mol.fragtypes[i]))
-        # now setup zero params
-        self.fixup_refsysparams()
-        # now remove the varable and make them regular params
-        self.varnames2par()
-        self.remove_pars(identifier=["b", "a", "d", "o"]) 
-        return
  
     def varnames2par(self):
         """
@@ -1575,7 +1583,7 @@ class ff(base):
         # should we add a name here in the file? the FF goes to par. keep it simple ...
         for ic in self.interaction_types:
             filt = None
-            if ic == "dih":
+            if ic == "dih" or ic == "bnd" or ic == "ang":
                 filt = ["ring"]
             elif ic == "vdw":
                 filt = ["molid"]
@@ -1603,6 +1611,7 @@ class ff(base):
             par_coll["hash"] = hash # add RIC hash to guarantee that these two match
             par_coll = self.collect(par_coll, compact=compact, fpar=fpar)
             yaml = ryaml.YAML()
+            yaml.width = 120
             yaml.indent(mapping=4, sequence=6, offset=2)
             yaml.default_flow_style = False
             yaml.prefix_colon = ' '
@@ -1763,7 +1772,7 @@ class ff(base):
                     raise IOError("Variables block and/or azone in fpar is missing!")
         else:
             # first check if this is a yaml file format
-            # 2024 RS: currently yaml files start with a version : X line (this could change and needs to be adopted, then)
+            # 2024 RS: currently yaml files start with a version : X line (this could change and needs to be adapted, then)
             fpar = open(fname + ".par", "r")
             line = fpar.readline()
             sline = line.split()
@@ -1912,10 +1921,17 @@ class ff(base):
                         nm   = lpt.params[i]
                         yaml_par[nm] = float(v) # make sure that all values are float and not numpy scalars (yaml does not like it)
                         if add_fit:
-                            vv = self.par.variables.finditem(ic, pname, i)
+                            vv, j = self.par.variables.finditem(ic, pname, i) # this is the name of the variable (string)
                             if vv:
-                                vvv = self.par.variables[vv]
-                                yaml_fit[nm] = ryaml.CommentedMap({"var": vv, "range": (float(vvv.range[0]), float(vvv.range[1]))}) # make sure this is float not np.float!
+                                vvv = self.par.variables[vv] # this is the varibale object itself (to access the attributes)
+                                if j == 0:
+                                    # this is the basic definition of the fit variable                                
+                                    yaml_fit[nm] = ryaml.CommentedMap({"var": vv, "range": (float(vvv.range[0]), float(vvv.range[1]))}) # make sure this is float not np.float!
+                                    if vvv.bounds is not None:
+                                        yaml_fit[nm]["bounds"] = (vvv.bounds[0], vvv.bounds[1])
+                                else:
+                                    # this is a reference to the variable in a cross term, no need to redefine ranges or bounds
+                                    yaml_fit[nm] = ryaml.CommentedMap({"var": vv})
                                 yaml_fit[nm].fa.set_flow_style()
                     # add units as comments
                     yaml_par = ryaml.CommentedMap(yaml_par)
@@ -1931,6 +1947,9 @@ class ff(base):
             par_collect[ic] = ic_par
         # do the meta data at the end
         # par_collections["meta"] = 
+        # add topoqeq parameter
+        par_collect["topoqeq"] = ryaml.CommentedMap(self.topoqeq_par)
+        # par_collect["topoqeq"].fa.set_flow_style()
         return par_collect
 
     def distribute(self, par_coll):
@@ -1992,20 +2011,28 @@ class ff(base):
             # add the variables datastructure to par
             self.par.attach_variables()
             # now generate the entries using the temporary dict fit_par
-            # at the moment we keep all the things in the fpar file ... maybe we can do this more efficient in the future.
-            # better defaults!!
+            # for each varpar a range needs to be defined. bounds can be omitted, then we use ["z", "i"] as a default
+            # to make sure that all arpars have a range defined, we run over the fit_par dir twice. if any varpar does not have a range defined we
+            # stop with an error
             # NOTE varable names do NOT have to start with "$" any more but if you want to write old fpar files this is still a condition
+            varpar_ranges = {}
+            for v in fit_par.values():
+                if "range" in v:
+                    if v["var"] in varpar_ranges:
+                        # this varpar has been read before with ranges .. check if they differ
+                        assert v["range"] == varpar_ranges[v["var"]], f"Error: the variable {v['var']} has been defined with a differnt range already!"
+                    else:
+                        varpar_ranges[v["var"]] = v["range"] # append the range for this varpar
+            # now we can loop again. for each varpar a varpar_ranges entry must exist 
             for loc, data in fit_par.items():  # loc is the location as (ric, ricname without "pot->", parname -> gives pos via self.lmpspots.rics[ic][ptype].params.index(parname))
                 ric = loc[0]
                 ident = loc[1]
                 pot = par_coll[ric][ident]["pot"]
                 pos = self.lmpspots.rics[ric][pot].params.index(loc[2])
                 vname = data["var"]
+                assert vname in varpar_ranges, f"Error: the variable {vname} has not been defined with a range!"
                 value = par_coll[ric][ident]["par"][loc[2]] # ok, this is a bit complex ... we pick up the value of the parameter from the original par_coll
-                if "range" in data: 
-                    vrange = data["range"] # more smart defautls in the future here
-                else:
-                    raise NotImplementedError
+                vrange = varpar_ranges[vname] 
                 if "bounds" in data:
                     vbounds = data["bounds"]
                 else:
@@ -2016,6 +2043,9 @@ class ff(base):
                 self.par.variables[vname].pos.append((ric, ident, pos))
         # TODO handle meta data
         # TODO deal with vdwpr and chapr
+        # read in the topoqeq parameter
+        if "topoqeq" in par_coll:
+            self.topoqeq_par = par_coll["topoqeq"]
         return
 
 
@@ -2034,7 +2064,7 @@ class ff(base):
         TBI: we need to pack vdwpr and chapr
         """
         #assert not hasattr(self.par, 'variables'), "Can not pack force field data with variables"
-        if hasattr(self.par, 'variables'): return {"FF": None}
+        # if hasattr(self.par, 'variables'): return {"FF": None}
         data = {}
         # dummy dicts to assign a number to the type
         par_types = self.enumerate_types()

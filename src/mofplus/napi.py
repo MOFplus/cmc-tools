@@ -13,6 +13,7 @@ from requests.auth import HTTPBasicAuth as httpauth
 from urllib.parse import urlunparse, urlencode
 import os
 import json
+import io
 
 import logging
 from molsys.util.aftypes import aftype
@@ -133,6 +134,8 @@ class api:
                 return None
         else:
             logger.error("HTTP request to MOFplus failed with status code %s", response.status_code)
+            logger.error(f" -- Request URL: {urlp}")
+            logger.error(f" -- Request params: {params}")
             return None 
 
     def check_connection(self):
@@ -285,5 +288,82 @@ class api:
         return ret
 
 
-        
+    def upload_frag(self, name, mol, priority=None, comment=""):
+        """
+        Upload a fragment to MOFplus
+
+        Important: the mol object must have proper atom types (hydrogen replaced as x)
+                and the annotations in the atomtypes must be set with %
+
+        Args:
+            name (str): name of the fragment
+            mol (mol object): mol object to uplaod
+            priority (int, optional): priority of the fragment. Defaults to None (use non hydrogen atom count).
+
+        Returns:
+            dict: response from the server
+        """
+        molbstring = mol.to_string(ftype="mfpx").encode("utf-8")
+        fname = name + ".mfpx"
+        f = io.BytesIO(molbstring)
+        files = {'mfpx': (fname, f)}
+        if priority is None:
+            # use the number of non-hydrogen atoms as priority
+            priority = len([a for a in mol.elems if a != "x"])
+        else:
+            logger.warning("Priority is set to %d", priority)
+        assert priority >= 0, "Priority must be a non-negative integer"
+        atypes = [at.split("_")[0] for at in mol.atypes if at[0] != "x"] 
+        atypes = list(set(atypes))
+        annotate = {i: at for i,at in enumerate(mol.atypes) if at[0] != "x" and "%" in at}
+        urlp = self.scheme + "://" + self.netloc + self.path + "frags/upload"
+        data = {'name': name,
+                "priority": priority,
+                "atypes": atypes,
+                "annotate": json.dumps(annotate),
+                "comment": comment,
+                }
+        response = requests.post(urlp, auth=self.auth, files=files, data=data, timeout=self.timeout, verify=self.verify)
+        if response.status_code == 200:
+            if response.json()['status'] == 'OK':
+                logger.info("Fragment %s uploaded successfully", name)
+                return response.json()
+            else:
+                logger.error("Error in response: %s", response.json())
+                return None
+        else:
+            logger.error("HTTP request to MOFplus failed with status code %s", response.status_code)
+            return None
     
+    ####################  topoqeq stuff ##########################
+
+    def get_topoqeq_fits(self, **query):
+        """
+        Get the topoqeq fits from MOFplus
+
+        Args:
+            **query: query parameters to filter the fits
+
+        Returns:
+            dict: dictionary with the topoqeq fits
+        """
+        raw = self.get_response("topoqeq_fit", **query)
+        fits = {e["name"]: e for e in raw}
+        return fits
+
+    def get_topoqeq_par(self, fitid, atypes):
+        """
+        Get the topoqeq parameters for a fit
+
+        Args:
+            fitid (int): ID of the fit
+            atypes (list): list of atom types to get the parameters for
+
+        Returns:
+            dict: dictionary with the topoqeq parameters
+        """
+        raw = self.get_response("topoqeq_par", fitid=fitid, atypes=atypes)
+        params = {}
+        for e in raw:
+            params[e["atype"]] = [e["sigma"], e["Jii"], e["Xi"]]
+        return params

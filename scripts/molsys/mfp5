@@ -143,7 +143,7 @@ except IOError:
 ########### report content of mfp5 file ###################################
 
 print("\nReading and processing system info from file!")
-mol = pdiof.get_mol_from_system()
+mol, vel, img = pdiof.get_mol_from_system()
 elems = mol.get_elems()
 atypes = mol.get_atypes()
 bcd = mol.get_bcond()

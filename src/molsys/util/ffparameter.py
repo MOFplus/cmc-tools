@@ -122,18 +122,28 @@ class varpars(dict):
             return k
 
     def finditem(self, ic, pot, pos):
+        """
+        Method to find a varpar object by its position in the ff.par dictionary
+        :Parameters:
+            - ic(str):  ric, e.g. "bnd", "ang", "dih", "oop"
+            - pot(str): name of the potential (eg. "mm3->(c3_c1o2@co2,o2_c1cu1@co2)|CuPW")
+            - pos(int): position of the parameter 
+        :Returns:   
+            - (str, int): name of the varpar object and the index of the entry in the pos list (first is the original ref and the follwoing are references in cross terms)
+        """
         for k,v in self.items():
-            for p in v.pos:
+            for j, p in enumerate(v.pos):
                 if p[0] == ic and p[1] == pot and p[2] == pos:
-                    return k
-        return False
+                    return k, j
+        return False, -1
 
     @property
     def ranges(self):
         ranges = []
         for k,v in self.items():
-            ranges.append(float(v.range))
-        return ranges
+            # ranges.append(float(v.range)) # seems wrong .. range is a list
+            ranges.append(v.range)
+        return np.array(ranges)
 
     @ranges.setter
     def ranges(self, ranges):
@@ -198,4 +208,12 @@ class varpars(dict):
         for i,v in enumerate(self.values()): v(vals[i])
         return
 
-
+    def report(self):
+        """
+        Method to print a report of the varpars
+        """
+        for k,v in self.items():
+            print (f"Var: {k:20s} : val = {v.val:10.3f} range = {v.range[0]:10.3f} - {v.range[1]:10.3f} bounds = {v.bounds[0]} - {v.bounds[1]}")
+            for p in v.pos:
+                print (f"  {p[0]:3s} {p[1]:30s} {p[2]:3d}")
+        return

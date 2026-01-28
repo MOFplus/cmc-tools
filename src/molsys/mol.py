@@ -491,7 +491,7 @@ class mol(mpiobject):
         pio = mfp5io.mfp5io(fname, restart=stage, filemode="r")
         # get the mol obejct from the mfp5 file
         m = cls()
-        m = pio.get_mol_from_system(mol=m)
+        m, vdummy, idummy = pio.get_mol_from_system(mol=m, vel=False, img=False)
         pio.close()
         if traj:
             m.addon("traj", source="mfp5", fname=fname, stage=stage)
@@ -2041,6 +2041,7 @@ class mol(mpiobject):
         self.pimages = pimages
         if self.conn is not None:
             self.set_etab_from_conns()
+        self.fixup_fragnumbers()
         return
 
     def delete_atom(self,bad, keep_conn=False):
@@ -2051,7 +2052,21 @@ class mol(mpiobject):
         """
         self.delete_atoms([bad], keep_conn=keep_conn)
         return
-
+    
+    def fixup_fragnumbers(self) -> None:
+        """Can be used to make the fragment numbers consecutive again 
+        after deleting atoms and therefore potentially whole fragments.
+        """
+        fragnumbers = np.array(self.fragnumbers)
+        max_number = fragnumbers.max()
+        unique_numbers = set(np.unique(fragnumbers).tolist())
+        target_numbers = set(range(max_number+1))
+        missing_frags = sorted(target_numbers.difference(unique_numbers))
+        for frag in missing_frags:
+            fragnumbers = np.where(fragnumbers > frag, fragnumbers-1, fragnumbers)
+        self.fragnumbers = fragnumbers.tolist()
+        return None
+    
     def remove_dummies(self, labels=['x','xx'], keep_conn=False):
         ''' removes atoms by atom labels
         Args:

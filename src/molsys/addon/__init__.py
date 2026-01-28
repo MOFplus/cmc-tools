@@ -55,7 +55,8 @@ __all__ = [
     "obabel",
     "traj",
     "charge",
-    "jaxff"
+    "jaxff",
+    "rdk"
 ]
 
 _importfunc = {k:None for k in __all__}

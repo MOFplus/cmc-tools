@@ -151,7 +151,10 @@ class mfp5io(mpiobject):
             # if ffe is None we are in analysis mode (means the file must exist)
             assert self.fexists, "MFP5 ERROR: For analysis the file must exist!"
             self.mode = "analysis"
-            self.restart_stage = "default" # use default stage to start up (should be always there, right?)
+            if restart is not None:
+                self.restart_stage = restart
+            else:
+                self.restart_stage = "default" # use default stage to start up (should be always there, right?)
         # now open the file
         self.open()
         #
@@ -210,6 +213,14 @@ class mfp5io(mpiobject):
     # Note: in the old pdlpio system this data was prepared by the mol (assign_FF) class and just written here
     #       Now in mfpfio we expect a certain interface, namely the mol object from molsys and collect all the 
     #       data in an active way
+    #
+    # RS 2025  added fixed charges
+    #       he legacy method was to generate charges from the FF which is in the system group. It was cheap to
+    #       regenerate and so no need to store. 
+    #       Now we generate charges by topoqeq (they are differnt for all atoms even if atype is the same)
+    #       this takes a while and we prefer to store them
+    #       This is different from any fluctuating charge model where q needs to be stored in the trajectory info
+    #       TODO do we need charges in restart??? only if charge is a dynamic variable (extended lagrangian methods)
 
     def write_system(self):
         """ Writes all the info from a mol object to the system group in the mfp5 file
@@ -224,6 +235,7 @@ class mfp5io(mpiobject):
         Further info is stored in subgroups for different addons
             - ff addon (parameter and rics)
             - molecules addon (TBI)
+            - charges from charge addon IF these are made by topoqeq (including metadata)
 
         """
         self.open()
@@ -284,6 +296,17 @@ class mfp5io(mpiobject):
                         fnpars[...] = p[2]
                         fpars = fp.require_dataset("pars", shape=p[3].shape, dtype="float64")
                         fpars[...] = p[3]
+            # now check if we have a charge addon and if charges are made by topoqeq
+            if "charge" in self.ffe.mol.loaded_addons:
+                # check if charges are made by topoqeq
+                charge = self.ffe.mol.charge
+                method = charge.method.split(",")[0]
+                if charge.has_charges and (method == "topoqeq" or method == "topoqeq_sparse"):
+                    # we need to store charges
+                    chgf = system.require_dataset("charge", shape=(na,), dtype="float32")
+                    chgf[...] = charge.q
+                    # store metadata
+                    chgf.attrs["method"] = charge.method
         return
 
     def compare_system(self):
@@ -307,7 +330,7 @@ class mfp5io(mpiobject):
         assert OK, "MFP5 ERROR: The system in the mfp5 file is not equivalent to your actual system. Aborting!"
         return
 
-    def get_mol_from_system(self, vel=False, restart_ff=True, mol=None):
+    def get_mol_from_system(self, vel=False, img=True, restart_ff=True, mol=None):
         """ read mol info from system group and generate a mol object 
 
         in parallel this is done on the master only and the data is broadcasted to the other nodes
@@ -347,7 +370,28 @@ class mfp5io(mpiobject):
         mol.set_fragtypes(fragtypes)
         mol.set_ctab(cnc_table, conn_flag=True)
         mol.bcond = bcd
+        # now do the charges ... need to check on the master if there are charges and communicate this
+        if self.is_master:
+            if "charge" in list(system.keys()):
+                charge = np.array(system["charge"], dtype="float64")
+                has_charge = True
+                method = system["charge"].attrs["method"]
+            else:
+                has_charge, method = False, None
+        else:
+            has_charge, method = False, None
+        has_charge, method = self.mpi_comm.bcast((has_charge, method))
+        if has_charge:
+            mol.addon("charge")
+            if not self.is_master:
+                charge = np.empty([na], dtype="float64")
+            self.mpi_comm.Bcast(charge)
+            mol.charge.q[:] = charge
+            mol.charge.method = method
+            mol.charge.has_charges = True
         # now read the restart info that needs to be passed to the mol instance (Note: no velocities etc are read here)
+        velocities = None
+        images = None
         if self.is_master:
             try:
                 rstage = self.h5file[self.restart_stage]
@@ -359,12 +403,16 @@ class mfp5io(mpiobject):
             cell = np.array(restart["cell"], dtype="float64")
             if vel:
                 velocities = np.array(restart["vel"], dtype="float64")
+            if img:
+                images = np.array(restart["img"], dtype="int32")            
         if self.mpi_size>1:
             if self.is_master:
                 self.mpi_comm.Bcast(xyz)
                 self.mpi_comm.Bcast(cell)
                 if vel:
                     self.mpi_comm.Bcast(velocities)
+                if img:
+                    self.mpi_comm.Bcast(images)
             else:
                 xyz = np.empty([na, 3], dtype="float64")
                 cell = np.empty([3, 3], dtype="float64")
@@ -373,6 +421,9 @@ class mfp5io(mpiobject):
                 if vel:
                     velocities = np.empty([na, 3], dtype="float64")
                     self.mpi_comm.Bcast(velocities)
+                if img:
+                    images = np.empty([na, 3], dtype="int32")
+                    self.mpi_comm.Bcast(images)
         mol.set_xyz(xyz)
         mol.set_cell(cell)
         # new check if addon data is present in the system group
@@ -404,12 +455,9 @@ class mfp5io(mpiobject):
             # yes there was ff data .. set up mol addon ff
             mol.addon("ff")
             mol.ff.unpack(ff_data)
-        if vel:
-            return (mol, velocities)
-        else:
-            return mol
+        return mol, velocities, images
 
-    def get_mol_from_system_hpc(self, vel=False, restart_ff=True):
+    def get_mol_from_system_hpc(self, vel=False, img=True, restart_ff=True):
         """ read mol info from system group and generate a mol object only on the head node
         all othre nodes get None object
 
@@ -417,7 +465,7 @@ class mfp5io(mpiobject):
         can not be pickled. we need to find out if this can be avoided. for the moment we have two routines .. one that commincates all
         data and one (hpc mode) that does not.
 
-        NOTE: it is a bit hacky but we need to communicate the velocities in case of a restart. that is why we bcast them here also in hpc mode.
+        NOTE: it is a bit hacky but we need to communicate the velocities/images in case of a restart. that is why we bcast them here also in hpc mode.
 
         Args:
             - vel (bool, otional): Defaults to False. If True: return velocity array in addtion to mol object
@@ -446,6 +494,12 @@ class mfp5io(mpiobject):
             mol.set_fragtypes(fragtypes)
             mol.set_ctab(cnc_table, conn_flag=True)
             mol.bcond = bcd
+            # check for charges present in the system group
+            if "charge" in list(system.keys()):
+                mol.addon("charge")
+                mol.charge.q[:] = np.array(system["charge"], dtype="float64")
+                mol.charge.method = system["charge"].attrs["method"]
+                mol.charge.has_charges = True
             # now read the restart info that needs to be passed to the mol instance (Note: no velocities etc are read here)
             try:
                 rstage = self.h5file[self.restart_stage]
@@ -455,12 +509,6 @@ class mfp5io(mpiobject):
             restart = rstage["restart"]
             xyz = np.array(restart["xyz"], dtype="float64")
             cell = np.array(restart["cell"], dtype="float64")
-            if vel:
-                na = self.mpi_comm.bcast(na)
-                velocities = np.array(restart["vel"], dtype="float64")
-                self.mpi_comm.Bcast(velocities)
-            else:
-                velocities = None
             mol.set_xyz(xyz)
             mol.set_cell(cell)
             # new check if addon data is present in the system group
@@ -489,20 +537,29 @@ class mfp5io(mpiobject):
                 # yes there was ff data .. set up mol addon ff
                 mol.addon("ff")
                 mol.ff.unpack(ff_data)
+            if vel:
+                velocities = np.array(restart["vel"], dtype="float64")
+            if img:
+                images = np.array(restart["img"], dtype="int32")
         else:
             mol = None
-            # on all other nodes return None
-            if vel:
-                na = 0
-                na = self.mpi_comm.bcast(na)
-                velocities = np.empty([na, 3], dtype="float64")
-                self.mpi_comm.Bcast(velocities)
-            else:
-                velocities = None
+        # now communicate the restart info
+        if not self.is_master:
+            na = 0
+        na = self.mpi_comm.bcast(na)
         if vel:
-            return (mol, velocities)
+            if not self.is_master:
+                velocities = np.empty([na, 3], dtype="float64")
+            self.mpi_comm.Bcast(velocities)
         else:
-            return mol
+            velocities = None
+        if img:
+            if not self.is_master:
+                images = np.empty([na, 3], dtype="int32")
+            self.mpi_comm.Bcast(images)
+        else:
+            images = None
+        return (mol, velocities, images) # if vel or images not requested they will be None
 
     ##### expot stuff ##################################################################
 

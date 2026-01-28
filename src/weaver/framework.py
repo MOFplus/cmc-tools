@@ -1101,7 +1101,8 @@ mol addrep 0
         self.set_framework_connections(framework_connections)
         self.framework.remove_dummies(keep_conn=True)
         if atype is True:
-            at = molsys.util.atomtyper(self.framework); at()
+            at = molsys.util.atomtyper(self.framework)
+            at(fix=True)
         return self.framework
 
     def generate_all_frameworks(self,basename):

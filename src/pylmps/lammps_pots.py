@@ -20,6 +20,13 @@
     A note on units:
     for added terms pelase check to have units consistent with the existing ones .. they are checked purely as strings!
 
+    ------
+
+    added defaults for fitting here (ranges, type, )
+    these are used in assign_FF to generate the fitting setup
+
+    RS RUB 05.2025
+
 """
 
 import numpy as np
@@ -51,8 +58,9 @@ class lpot:
                 pform=None,
                 units=None,
                 lammps_name=None,
-                range=None,
-                bounds=None,
+                fit_type=None,
+                fit_range=None,
+                fit_bounds=None,
                 param_converter=None,
                 special_writer=None,
                 reverse_mask=None, # index mask to revert the params if the order of atoms is reverted (only bnd, ang, dih)
@@ -80,9 +88,11 @@ class lpot:
         else:
             self.lammps_name = lammps_name
         self.lammps_name = self.lammps_name.replace("_", " ") # currently only one !! underscore is allowed which should be sufficient
-        # TODO add or invent range and bounds for the fitting
-        self.range = range
-        self.bounds = bounds
+        # fiting setup
+        # assert fit_type in ["val", "geom", "expl", None] # val: just values, geom: take from geometry, expl: an explicit number (no fitting)
+        self.fit_type = fit_type
+        self.fit_range = fit_range
+        self.fit_bounds = fit_bounds
         # special functions to massage units or compute lammps params from FF params
         self.param_converter = param_converter
         self.special_writer = special_writer
@@ -245,6 +255,8 @@ def register_defaults(lp):
                     units=("mdyne/A", "A"),
                     lammps_name="class2",
                     param_converter=par_mm3_bnd,
+                    fit_type=("val", "geom"),
+                    fit_range=((0.0, 8.0), 10.0),  # first is the range for kb, second is percent for r0
     ))
 
 
@@ -253,6 +265,8 @@ def register_defaults(lp):
                     "class2",
                     params=("r0", "k2", "k3", "k4"),
                     units=("A", "kcal/(mol*A^2)", "kcal/(mol*A^3)", "kcal/(mol*A^4)"),
+                    fit_type=("geom", "val", "val", "val"),
+                    fit_range=(10.0, (0.0, 8.0), (0.0, 8.0), (0.0, 8.0)),
     ))
 
 
@@ -269,6 +283,8 @@ def register_defaults(lp):
                     units=("mdyne/A", "A", "1/A", "1/A^2"),
                     lammps_name="class2",
                     param_converter=par_quartic_bnd,
+                    fit_type=("val", "geom", "val", "val"),
+                    fit_range=((0.0, 8.0), 10.0, (0.0, 8.0), (0.0, 8.0)),
     ))
 
     # harm 
@@ -278,6 +294,8 @@ def register_defaults(lp):
                     units=("mdyne/A", "A"),
                     lammps_name="harmonic",
                     param_converter=lambda p: (p[0]*mdyn2kcal/2.0, p[1]),
+                    fit_type=("val", "geom"),
+                    fit_range=((0.0, 8.0), 10.0),
     ))
 
     # morse 
@@ -286,6 +304,8 @@ def register_defaults(lp):
                     params=("kb", "r0", "Ed"),
                     units=("mdyne/A", "A", "kcal/mol"),
                     param_converter=lambda p: (p[2], np.sqrt(p[0]*mdyn2kcal/2.0/p[2]), p[1]),  # check alpha!!!
+                    fit_type=("val", "geom", "val"),
+                    fit_range=((0.0, 10.0), 10.0, (10.0, 50.)),                   
     ))
 
     #################################################################################################################################
@@ -307,6 +327,8 @@ def register_defaults(lp):
                     units=("mdyn*A/rad^2", "deg"),
                     lammps_name="class2/p6",
                     param_converter=par_mm3_ang,
+                    fit_type=("val", "geom"),
+                    fit_range=((0.0, 2.0), 10.0,),
     ))
 
     # mm3 cross strbnd
@@ -330,7 +352,9 @@ def register_defaults(lp):
                     param_converter=par_mm3_strbnd,
                     reverse_mask=[1, 0, 2, 4, 3, 5],  # this is the mask to revert the params if the order of atoms is reverted
                     is_cross=True,
-                    cross_parent="mm3"
+                    cross_parent="mm3",
+                    fit_type=("val", "val", "val", "val", "val", "geom"), # TODO the distances need to be taken from the parent potential (a0)
+                    fit_range=((0.0, 2.0), (0.0, 2.0), (0.0, 2.0), (1.0, 3.5), (1.0, 3.5), 10.0),
     ))
 
     # fourier
@@ -340,7 +364,9 @@ def register_defaults(lp):
                     units=("kcal/mol", "deg", "", "", ""),
                     lammps_name="cosine/buck6d",
                     param_converter= lambda p: (0.5*p[0]*angleunit*rad2deg*rad2deg/p[2], p[2], p[1]),
-                    pform="fif"
+                    pform="fif",
+                    fit_type = ("val", "expl", "expl", "expl", "expl"),
+                    fit_range = ((0.0, 2.0), 180.0, 4.0, 1.0, 1.0),
     ))
 
     # quartic (class2) NOTE we use lammps units and order here intead of old mm3/tinker style from pydlpoly
@@ -348,6 +374,8 @@ def register_defaults(lp):
                     "class2",
                     params=("a0", "k2", "k3", "k4"),
                     units=("deg", "kcal/(mol*rad^2)", "kcal/(mol*rad^3)", "kcal/(mol*rad^4)",),
+                    fit_type = ("geom", "val", "val", "val"),
+                    fit_range = (10.0, (0.0, 2.0), (0.0, 2.0), (0.0, 2.0)),
     ))
     lp.register(lpot("ang",
                     "class2_bb",
@@ -404,6 +432,8 @@ def register_defaults(lp):
                     units=("kcal/mol", "kcal/mol", "kcal/mol"),
                     lammps_name="opls",
                     param_converter=lambda p: (p[0], p[1], p[2], 0.0),
+                    fit_type=("val", "val", "val"),
+                    fit_range=((0.0, 15.0), (0.0, 15.0), (0.0, 15.0)),
     ))
 
     # cos4
@@ -412,13 +442,17 @@ def register_defaults(lp):
                     params=("V1", "V2", "V3", "V4"),
                     units=("kcal/mol", "kcal/mol", "kcal/mol", "kcal/mol"),
                     lammps_name="opls",
+                    fit_type=("val", "val", "val", "val"),
+                    fit_range=((0.0, 15.0), (0.0, 15.0), (0.0, 15.0), (0.0, 15.0)),
     ))
 
     # class2 from lammps with cross terms 
     lp.register(lpot("dih",
                     "class2",
                     params=("k1", "phi1", "k2", "phi2", "k3", "phi3"),
-                    units=("kcal/mol", "deg", "kcal/mol", "deg", "kcal/mol", "deg"),             
+                    units=("kcal/mol", "deg", "kcal/mol", "deg", "kcal/mol", "deg"),
+                    fit_type=("val", "expl", "val", "expl", "val", "expl"),
+                    fit_range=((0.0, 15.0), 0.0, (0.0, 15.0), 180.0, (0.0, 15.0), 0.0),             
     ))
     lp.register(lpot("dih",
                     "class2_mbt",
@@ -487,6 +521,8 @@ def register_defaults(lp):
                     units=("mdyne*A/rad^2", "deg"),
                     lammps_name="inversion/harmonic",
                     param_converter=lambda p: (p[0]*mdyn2kcal*1.5, p[1]),
+                    fit_type=("val", "expl"),
+                    fit_range=((0.0, 1.0), 0.0),
     ))
     # added by GS: TODO check correctness
     lp.register(lpot("oop",
@@ -524,6 +560,12 @@ def register_defaults(lp):
                      ))
 
 
+    lp.register(lpot("cha",
+                     "point",
+                     params=("q"),
+                     units=("e")
+                     ))
+
    #################################################################################################################################
     #
     # vdw    ... these are registered only for yaml output (non bonded are handeled differntly in ff2lammps)
@@ -534,6 +576,12 @@ def register_defaults(lp):
                      units=( "A", "kcal/mol")
                      ))
 
+
+    lp.register(lpot("vdw",
+                     "lj",
+                     params=("r0", "eps"),
+                     units=( "A", "kcal/mol")
+                     ))
 
    #################################################################################################################################
     #
@@ -616,11 +664,13 @@ def register_defaults(lp):
 allowed_pair_styles = {
     "lj/cut" :                      ["cutoff"],
     "lj/mdf" :                      ["cutoff_inner", "cutoff"],
-    "coul/long" :                   ["cutoff"],
+    "coul/long" :                   ["cutoff_coul"],
     "lj/mdf/coul/long" :            ["cutoff_inner", "cutoff", "cutoff_coul"],
     "lj/mdf/coul/dsf" :             ["cutoff_inner", "cutoff", "coul_dampfact", "cutoff_coul"],
-    "lj/cut/coul/long" :            ["cutoff", "cutoff"],
-    "lj/cut/coul/dsf" :             ["cutoff", "cutoff"],
+    "lj/smooth/linear/coul/dsf" :   ["cutoff", "coul_dampfact", "cutoff_coul"],
+    "lj/cut/coul/long" :            ["cutoff", "cutoff_coul"],
+    "lj/long/coul/long" :           ["cutoff", "cutoff_coul"],
+    "lj/cut/coul/dsf" :             ["coul_dampfact", "cutoff", "cutoff_coul"],
     "lj/charmmfsw/coul/long" :      ["cut_lj_inner", "cutoff"],   # inner:cuttoff must be cutoff -2.0
     "lj/charmm/coul/gauss/long" :   ["cut_lj_inner", "cut_lj", "coul_smooth", "cut_coul"], 
     "lj/charmm/coul/gauss/dsf" :    ["cut_lj_inner", "cut_lj", "cut_coul"],

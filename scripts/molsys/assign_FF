@@ -20,10 +20,26 @@ import os
 import mofplus
 from molsys.util.timer import timer, Timer
 from molsys.util.aftypes import aftype, aftuple, afdict
+from molsys.util import elems
+from molsys.util.ffparameter import varpar
+import numpy as np
 
-import itertools
+
 from pathlib import Path
 import argparse
+import ruamel.yaml as ryaml
+import re
+
+import itertools
+from operator import getitem
+# from https://docs.python.org/3/library/itertools.html#itertools.combinations
+def subslices(seq):
+    "Return all contiguous non-empty subslices of a sequence."
+    # subslices('ABCD') → A AB ABC ABCD B BC BCD C CD D
+    slices = itertools.starmap(slice, itertools.combinations(range(len(seq) + 1), 2))
+    return map(getitem, itertools.repeat(seq), slices)
+
+
 
 # import logging
 # logging.basicConfig(filename="assign_FF.log", filemode="a", level=logging.ERROR)
@@ -41,6 +57,7 @@ except ImportError:
     sys.exit(1)	
 
 ptprompt = pt.PromptSession()
+from prompt_toolkit.shortcuts import radiolist_dialog
 
 # load and init the lmpspots module
 # in order to have access to the reverse masks
@@ -100,8 +117,39 @@ parser = argparse.ArgumentParser(description="Assign FF to a system")
 parser.add_argument("name", type=str, help="mfpx file to assign")
 parser.add_argument("--FF", type=str, help="FF name on MOFplus to be considered", action="append")
 parser.add_argument("--ref", type=str, help="Reference system name on MOFplus to be considered", action="append")
+parser.add_argument("--debug", action="store_true", help="Debug mode (default: False)")
+parser.add_argument("--cache", type=str, default="", help='Path to save cache files (mfpx, refpar) (default: "")')
+parser.add_argument("--offline", type=str, default="", help='Path to offline assignement using cached files (mfpx, refpar) (default: "")')
+parser.add_argument("--skip", action="store_true", help="Use in cnnection with --offline .. allows to skip any assignement (default: False)")
+parser.add_argument("--ring", action="store_true", help="Detect small rings (3,4,5) (default: False)")
+parser.add_argument("--topoqeq", action="store_true", help="Add topoqeq params to par file (default: False)")
 args = parser.parse_args()
 name = Path(args.name)
+
+cache_files = False
+if args.cache != "":
+    cache = Path(args.cache)
+    cache_files = True
+    if not cache.exists():
+        print (f" -- Cache path {cache} does not exist")
+        os.makedirs(cache)
+        print (f" -- Cache files will be written to {cache}")
+    else:
+        print (f" -- Cache files will be written to {cache} (existing files will be overwritten)")
+
+offline = False
+if args.offline != "":
+    offline = True
+    offline_path = Path(args.offline)
+    if not offline_path.exists():
+        print (f" -- Offline path {offline_path} does not exist")
+        if not args.skip:
+            sys.exit(1)
+        else:
+            print (f" -- Skipping assignement")
+    else:
+        print (f" -- Using offline files from {offline_path} to assign FFs")
+
 
 tm = Timer("ASSIGN_FF")
 # get runname and the mfpx file, load system
@@ -116,8 +164,8 @@ if Path(root_name + ".ric").exists() and Path(root_name + ".par").exists():
         print (" -- Loading existing ric/par files")
         m.ff.read(root_name)
 
-# do this in the first place without the cache (we can implement such a thing later)
-# the idea is that there will be no changes in the database during an assigenemnt and we can cache all requests locally.
+# At the moment the script still connects to MOFplus .. we could bypass this in the future
+# but in general also offline assigners should be able to connect to MOFplus
 
 mfpapi = mofplus.api() # open mofplus api connection with defaults ... could allow changes here
 print ("""
@@ -151,13 +199,18 @@ if status == None:
 else:
     print (" -- Connection successful\n")
 
+######################################################################################################################
+# from here on we connect to MOFplus and get the data we need
+######################################################################################################################
+
+
 sp_atypes = mfpapi.get_special_atypes()
-m.addon("ff", special_atypes= sp_atypes) # TODO: what about smallrings?
+m.addon("ff", special_atypes= sp_atypes, smallring=args.ring)
 
 # first we need to get all the aftypes from the mfp file
 aftypes = [aftype(aft.atype, aft.fragtype) for aft in m.ff.aftypes]
 # in order to assign aromatic fragments as if they were phenyl we need a second set of aftypes with the aromatic fragments replaced by phenyl
-phenyl_like = ["naph"] # TODO load from MOFplus
+phenyl_like = ["naph", "carbazol"] # TODO load from MOFplus
 aftypes2 = [aftype(aft.atype, "ph" if aft.fragtype in phenyl_like else aft.fragtype) for aft in aftypes]
 
 # before we start we make a list of rnames for each ric, becasue we need these later anyway
@@ -179,27 +232,32 @@ The system contains the following aftpyes (atomtypes and fragmenttypes):
 {saft}
 """)
 
-print ("All available FFs from MOFplus") 
-# get all accesible FFs from MOFplus
-ffs = mfpapi.get_FF() # we get a dicitionary keyed by the name
-ff_list = list(ffs.keys())
-fftab = PrettyTable()
-fftab.field_names = ["Name", "Private", "Comment"]
-for f in ff_list:
-    fftab.add_row([f, f'{"X" if ffs[f]["private"] else "   "}', ffs[f]["comment"]])
-print (fftab)
-if args.FF != None:
-    sel_ff = [f for f in args.FF if f in ff_list] # CLI arguments have been given
-    print (f" -- FFs selected from CLI: {sel_ff}")
-else:
-    sel_ff = ptchooser("\nSelect FF (None for bypassing MOFplus)", ff_list + ["None"], default="MOF-FF")
-if sel_ff[0] == "None":
-    print (" -- WARNING: Parameter assignement from MOFplus will be bypassed ")
-    sel_ff = []
-else:
-    sel_ff_id = [ffs[s]["id"] for s in sel_ff]
+if not offline:
 
-if len(sel_ff) > 0:
+    print ("All available FFs from MOFplus") 
+    # get all accesible FFs from MOFplus
+    ffs = mfpapi.get_FF() # we get a dicitionary keyed by the name
+    ff_list = list(ffs.keys())
+    fftab = PrettyTable()
+    fftab.field_names = ["Name", "Private", "Comment"]
+    for f in ff_list:
+        fftab.add_row([f, f'{"X" if ffs[f]["private"] else "   "}', ffs[f]["comment"]])
+    print (fftab)
+    if args.FF != None:
+        sel_ff = [f for f in args.FF if f in ff_list] # CLI arguments have been given
+        print (f" -- FFs selected from CLI: {sel_ff}")
+    else:
+        sel_ff = ptchooser("\nSelect FF (None for bypassing MOFplus)", ff_list + ["None"], default="MOF-FF")
+    if sel_ff[0] == "None":
+        print (" -- WARNING: Parameter assignement from MOFplus will be bypassed ")
+        sel_ff = []
+    else:
+        sel_ff_id = [ffs[s]["id"] for s in sel_ff]
+
+    # if len(sel_ff) == 0:
+    #     print (" -- No FFs selected, exiting")
+    #     sys.exit(1)
+
     # only if we have selected FFs we need to go on with the assignement
     # TODO check if these refsystems have fits that are part of the chosen selection of FFs ... otherwise we can discard them anyway.
     #          --> needs preloading fit stuff for all refsystems or we check this server side and send refsys only if accesible fits exist.
@@ -220,32 +278,35 @@ if len(sel_ff) > 0:
                 refs.append(r)
         # get info for all refs
         ref_dict = {}
-        for r in refs:
-            ref_dict.update(mfpapi.get_FFrefs(name=r))
-        refs.sort(key=lambda x: ref_dict[x]["priority"], reverse=True)
-        rtab = PrettyTable()
-        rtab.field_names = ["Priority", "Name", "Comment"]
-        for r in refs:
-            rd = ref_dict[r]
-            rtab.add_row([rd["priority"], r, rd["comment"]])
-        print (rtab)
-        if args.ref != None:
-            sel_ref = [r for r in refs if r in args.ref] # CLI arguments have been given
-            print (f" -- Refsystems selected from CLI: {sel_ref}")
+        if len(refs) > 0:
+            for r in refs:
+                ref_dict.update(mfpapi.get_FFrefs(name=r))
+            refs.sort(key=lambda x: ref_dict[x]["priority"], reverse=True)
+            rtab = PrettyTable()
+            rtab.field_names = ["Priority", "Name", "Comment"]
+            for r in refs:
+                rd = ref_dict[r]
+                rtab.add_row([rd["priority"], r, rd["comment"]])
+            print (rtab)
+            if args.ref != None:
+                sel_ref = [r for r in refs if r in args.ref] # CLI arguments have been given
+                print (f" -- Refsystems selected from CLI: {sel_ref}")
+            else:
+                sel_ref = ptchooser("\nSelect reference system", refs)
+            sel_ref_dict = {}
+            for r in sel_ref:
+                sel_ref_dict[r] = ref_dict[r]
+            ref_dict = sel_ref_dict # drop all we do not need anymore
         else:
-            sel_ref = ptchooser("\nSelect reference system", refs)
-        sel_ref_dict = {}
-        for r in sel_ref:
-            sel_ref_dict[r] = ref_dict[r]
-        ref_dict = sel_ref_dict # drop all we do not need anymore
+            print (" -- No reference systems found matching the fragments in the system")
             
     with tm("get fits"):
         # get the corresponding fits for the selected refsystems and selected FFs
         fit_dict = {}
-        for r in list(sel_ref_dict.keys()):
+        for r in list(ref_dict.keys()):
             fits = []
             for ff in sel_ff_id:
-                fits.extend(mfpapi.get_FFfits(refID1=sel_ref_dict[r]["id"], FFID=ff))
+                fits.extend(mfpapi.get_FFfits(refID1=ref_dict[r]["id"], FFID=ff))
             # if there is no fit for the refsys in the chosen FFs we delete the refsys from the list
             if len(fits) == 0:
                 del ref_dict[r]
@@ -284,6 +345,87 @@ if len(sel_ff) > 0:
             # rmol[r].fragments.frag_graph.save(f"{r}_fgraph.gt")
             # rmol[r].write(f"{r}.mfpx")
 
+elif offline and not args.skip:
+
+    # get all the necessary info from the cache files
+    # the assumption is that the file names represent the refsysnames and we have pairs of mfpx and refpar
+    # so we chack for the mfpx and load the mol objects, then we load the refpar and do the paramter "curation"
+    # as if it would be downloaded from MOFplus
+    print (f" -- Loading offline files from {offline_path}")    
+    ref_list = []
+    ref_prio = {}
+    rmol = {}
+    ref_params = {}
+    fit_dict = {}
+    for f in offline_path.glob("*.mfpx"):
+        ref = f.stem
+        print (f" -- Loading {ref} from {f}")
+        rmol[ref] = molsys.mol.from_file(str(f)) # molsys.mol does not like Path obejcts :-(
+        rmol[ref].addon("fragments")
+        rmol[ref].fragments.make_frag_graph()
+        # now we need to load the corresponding refpar file
+        refpar = offline_path / f"{ref}.refpar"
+        if not refpar.exists():
+            print (f" -- WARNING: No refpar file found for {ref} in {offline_path}")
+        else:
+            ref_list.append(ref)
+            print (f" -- Loading refsys {ref}")
+            with open(refpar, "r") as yamlf:
+                yaml = ryaml.YAML(typ="safe")
+                par_yaml = yaml.load(yamlf)
+            # now we need to get the params from the yaml file
+            ric_pars = {}
+            for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+                rpar = afdict(ric=ric) # this is a dictionary of aftuple objects (knows its ric to do permutations)
+                rpar.unset_retrieve_mode()
+                for p in par_yaml[ric]:
+                    pentry = par_yaml[ric][p]
+                    if "assign" in pentry:
+                        if pentry["assign"] == False:
+                            # this is a special case where the parameter is not assignable  
+                            # we just skip it
+                            if args.debug:
+                                print (f" -- Skipping non-assignable parameter {p} in {ric} for ref {ref}")
+                            continue
+                    # need to split the p string into the atype@frag parts and generate an aftuple
+                    proot = (p.split("|")[0].split("->")[1])[1:-1] # this is to remove the parantheses around the string
+                    pname = [aftype(a.split("@")[0],a.split("@")[1]) for a in proot.split(",")]
+                    pname = aftuple(pname, ric=ric)
+                    pot = pentry["pot"]
+                    pard = pentry["par"]
+                    parl = [pard[nm] for nm in lpots.rics[ric][pot].params]
+                    if pname not in rpar:
+                        rpar[pname] = []
+                    rpar[pname].append((pot, parl))
+                ric_pars[ric] = rpar
+            ref_params[ref] = ric_pars
+            # now we need to get the settings from the MOFplus_settings section
+            fit_dict[ref] = {}
+            fit_dict[ref]["generic_atypes"] = par_yaml["MOFplus_settings"]["generic_atypes"]
+            fit_dict[ref]["arom_frag"] = par_yaml["MOFplus_settings"]["arom_frag"]
+            if "prio" in par_yaml["MOFplus_settings"]:
+                ref_prio[ref] = par_yaml["MOFplus_settings"]["prio"]
+            else:
+                ref_prio[ref] = rmol[ref].get_natoms() # this is a fallback to the number of atoms in the refsystem
+    # in order to get the priority right we sort the refs by priority (or natoms) and add in this order to ref_dict 
+    ref_list = sorted(ref_list, key=lambda x: ref_prio[x], reverse=True)
+    ref_dict = {r : None  for r in ref_list}
+    # check if anything was found locally   
+    if len(ref_dict) == 0:
+        print (" -- No reference systems found in offline path, consider using the --skip option to skip assignement")
+        sys.exit(1)
+    # optinally choose which offline refsys to use here
+    # end of offline part
+    sel_ff = ["LOCAL-FF"] # default for offline mode TODO keep FF in cache and load from there
+else:
+    print (" -- This is offline mode with skip: not assigning any FFs")
+    sel_ff = ["FIT-FF"]
+
+
+# main refsys detection loop ... refsys not occuring in the system will be discarded
+# NOTE this is run in regular online or offline mode
+
+if not args.skip:
     print ("\nDetecting reference systems by subgraph search on fragment graph of the system")
     with tm("detect refsystems"):
         rfrags = {}
@@ -312,16 +454,10 @@ if len(sel_ff) > 0:
                 print ("       seems not to occur -> deleting %s" % ref)
                 del ref_dict[ref]
 
-    # at this point we need to check if there are any atfix entries in the fit systems to be applied
-    # for the moment we apply all atfixes irrespective if the refsystem is used (this could be dangerous)
-    # and we keep these changes in the global aftypes list in the ff addon ... note: this is not in the mol object itself and 
-    # will not be written to the mfpx file 
-    # it might be better to have a copy of aftypes for each refsystem and use this for assignement only
-    # with tm("apply atfixes"):
-    #     for ref in ref_dict:
-    #         if fit_dict[ref]["atfix"] != None:
-    #             atfix = fit_dict[ref]["atfix"]
+# in offline mode we have read the params already from the refpar files (even non-existing ones)
+# but in online mode we need now to get the params from MOFplus
 
+if not offline:
     ### get all the frag and atype names to build the potential names later
     with tm("collect frag and atype entries"):
         frags = mfpapi.get_FFfrags_all()
@@ -338,7 +474,55 @@ if len(sel_ff) > 0:
             for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
                 ric_pars[ric] = curate_params(ric, mfpapi.get_params(ric, str(fit_dict[ref]["id"]))) # fitid needs to be a string
             ref_params[ref] = ric_pars
+            if args.debug:
+                print (f" -- Debug: {ref} params:")
+                for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+                    print (f" -- {ric}:")
+                    for p in ric_pars[ric]:
+                        print (f" --   {p}: {ric_pars[ric][p]}")
+            if cache_files:
+                # write out the params to a yaml file
+                print (f" -- Writing params to {cache}/{ref}.refpar")
+                rmol[ref].write(f"{cache}/{ref}.mfpx")
+                # convert the assignable params in ric_pars to a dict equivalent to the one written by the ff addon
+                # this needs not to be identical (no hash, no version, no settings, since only the necessary things for assignement
+                # need to be cached. This also indicates which parts of a par file are needed for the assignement)
+                par_yaml = {}
+                for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"]:
+                    par_yaml[ric] = {}
+                    for p in ric_pars[ric]:
+                        pots = ric_pars[ric][p]
+                        for pot, parval in pots:
+                            if pot != "equiv":  # this is a hack to remove the equiv stuff which is in the DB ... hope not to need this in the future anymore.
+                                lpts = lpots.rics[ric][pot]
+                                potname = f"{pot}->{p}|{ref}" # with "!s" we force the string representation of the aftuple
+                                parval_dict = ryaml.CommentedMap()
+                                for i, v in enumerate(parval):
+                                    parval_dict[lpts.params[i]] = v
+                                    parval_dict.yaml_add_eol_comment("# " + lpts.units[i], key=lpts.params[i])
+                                par_yaml[ric][potname] = {"pot": pot, "par": parval_dict}
+                # we need to store if fit_dict[ref]["arom_frag"] is set
+                # this is important for the assignement later
+                mfp_settings = {}
+                mfp_settings["generic_atypes"] = fit_dict[ref]["generic_atypes"]
+                mfp_settings["arom_frag"] = fit_dict[ref]["arom_frag"]
+                par_yaml["MOFplus_settings"] = mfp_settings
+                # write out the yaml file
+                yaml = ryaml.YAML()
+                yaml.indent(mapping=4, sequence=6, offset=2)
+                yaml.default_flow_style = False
+                yaml.prefix_colon = ' '
+                f = open(f"{cache}/{ref}.refpar", "w")
+                yaml.dump(par_yaml, f)
+                f.close()
 
+######################################################################################################
+# now we have all the params in the ref_params dictionary
+# and the refsystems in the ref_dict dictionary
+#######################################################################################################
+
+
+if not args.skip:
     ### main loop of assignement
     # things tested and found to work:
     # - instead of testing ric against each of the refsystem subsys make a flat set for each refsys (improvement is 2 orders of mag in execution time per iteration)
@@ -441,40 +625,406 @@ def check_unassigned():
 
 is_unassigned, unassigned, idx_ua = check_unassigned()
 
+################### FIXUP PART ###################################################################################
 # now we can fix up missing params using fit entries and write out
+# here all the logic to handle unassigned terms (make them fittable) will go
 
-if not is_unassigned:
-    print ("\nAll terms in the system could be assigned from MOFplus")
-else:
-    print ("\nSome terms could not be assigned (see table above)")
-    print (" -- adding missing terms as to be fit")
+
+# some helper functions
+def split_aftype(aftype):
+    ec = aftype.atype
+    ec = ec.split("_")[0]
+    num = re.search(r'\d+', ec)
+    if num:
+        num = num.group(0)
+        ec = ec.replace(num, "")
+        num = int(num)
+    else:
+        num = -1
+    return ec, num
+
+# helper to generate params list for new potential from lammps_pots defaults
+def generate_params(ric, ilist, pot, term, pvn_count=None):
+    """
+    Generate a list of default parameters for a given potential type.
+
+    Args:
+        ric (str): The type of interaction (e.g., "bnd", "ang", "dih", "oop", "cha", "vdw").
+        ilist (list): List of rics (atom indices) for which to generate parameters.
+        pot (str): The potential type (e.g., "mm3", "morse", "fourier", etc.).
+        term (str): The term name in the format "pot->(atom1, atom2, ...)|refsys".
+        pvn_count (int, optional): A counter to create unique variable names for parameters.    
+
+    This is used to create initial parameters for unassigned terms.
+    """
+    fit_type = lpots.rics[ric][pot].fit_type
+    fit_range = lpots.rics[ric][pot].fit_range
+    params = []
+    for j, ft in enumerate(fit_type):
+        if ft == "geom":
+            # geom type means get values from actual structure NOTE all values should be similar within a tolerance
+            vals = []
+            for r in ilist:
+                vals.append(float(m.ff.ric_type[ric][r].value))
+            vals = np.array(vals)
+            val = float(vals.mean())
+            delta_val = vals.std()
+            if delta_val > 0.1:
+                print(f" -- WARNING: For {ric} term {term} a deviation of {delta_val:.3f} for the individual geoms in the refstructure was found.")
+                print (f" -- Values: {vals}")
+                print (f" -- Mean:   {vals.mean()} +- {vals.std()}")
+            frng = [val * (1.0 - fit_range[j] / 100.0), val * (1.0 + fit_range[j] / 100.0)]
+        elif ft == "val":
+            val = 0.0
+            frng = fit_range[j]
+        elif ft == "expl":
+            val = fit_range[j]
+            frng = None
+        else:
+            raise ValueError(f"Unknown fit type {ft} in potential {pot} for {ric}")
+        params.append(val)
+        # only fit for geom or val type params
+        if ft in ("geom", "val"):
+            # invent a new name
+            if pvn_count != None:
+                # pvn_count is given so we can use it
+                pvn_name = f"${ric[0]}{pvn_count}_{j}"
+                if pvn_name not in m.ff.par.variables:
+                    m.ff.par.variables[pvn_name] = varpar(m.ff.par, name=pvn_name, val=val, range=frng)
+                    m.ff.par.variables[pvn_name].pos = [(ric, term, j)]
+                    print(f" -- Adding variable {pvn_name} for {ric} term with value {val} and range {frng}")
+                else:
+                    # if the variabel is used already just append to pos!!
+                    print(f" -- WARNING: Variable {pvn_name} already exists in par.variables, using existing one")
+            else:
+                # no pvn_count so we need to find the first unused number
+                pvn_count = 0
+                while f"${ric[0]}{pvn_count}_{j}" in m.ff.par.variables:
+                    pvn_count += 1
+                pvn_name = f"${ric[0]}{pvn_count}_{j}"
+                m.ff.par.variables[pvn_name] = varpar(m.ff.par, name=pvn_name, val=val, range=frng)
+                m.ff.par.variables[pvn_name].pos = [(ric, term, j)]
+                print(f" -- Adding variable {pvn_name} for {ric} term with value {val} and range {frng}")
+    # return the list of parameters
+    return params
+
+def del_params(m, ric, pot, term):
+    """delete params from par dict and potentially all variables that are associated with this term.
+    This is used to remove parameters that are not needed anymore, e.g. when a term is removed or replaced.
+
+    Args:
+        m (mol object): THE mol object with the ff addon
+        ric (string): current ric type, e.g. "bnd", "ang", "dih", "oop", "cha", "vdw"
+        pot (string): the potential type, e.g. "mm3", "morse", "fourier", etc.
+        term (string): the term like mm3->(....)|refsys
+    """
+    if term in m.ff.par[ric]:
+        del m.ff.par[ric][term]
+        # print ("DEBUG: Deleted term %s for %s potential %s" % (term, ric, pot))
+        # now search for all variables that are associated with this term
+        # we need to search for each potential param in that term
+        for i in range(len(lpots.rics[ric][pot].params)):
+            found, j = m.ff.par.variables.finditem(ric, term,i)
+            # print (f"DEBUG: Searching for variable {ric} {term} {i} -> found {found} at pos {j}")
+            if found:
+                del m.ff.par.variables[found].pos[j]
+                if len(m.ff.par.variables[found].pos) == 0:
+                    # if there are no positions left, we can delete the variable
+                    del m.ff.par.variables[found]
+                    print(f" -- Deleted variable {found} for {ric} term {term}")
+    return
+
+# TODO .. this is partly redundant and shares a lot wth the MOF-FF helper that follows. problem is that in MOF-FF 
+#         differnt terms can get different types depending if they are metal or not.
+def fixup_unassigned_pot(m, unassigned, idx_ua, ric, pot):
+    refsys = m.ff.refsysname
+    rtyp = m.ff.ric_type[ric] # list of lists of atom indices for each ric
+    par = m.ff.par[ric] # dict of params (key is the potname, value is a tuple of (pot, parval))
+    parind = m.ff.parind[ric] # list of lists of potnames for each ric
+    print (f" -- Fixing up unassigned {ric} terms")
+    pvn_count = 0
+    for i, ua in enumerate(unassigned):
+        ilist = idx_ua[i]
+        ats = [split_aftype(a) for a in ua]
+        # generate the potential name
+        potname = f"{pot}->{ua!s}|{refsys}" # with "!s" we force the string representation of the aftuple
+        # put it into the parind at all locations of the unassigned term
+        for j in ilist:
+            parind[j] = [potname] # no crossterms at this point
+        assert potname not in par, f" -- ERROR: Potential {potname} already in par dictionary for {ric}!"
+        # now we need to add the potential and parameters to the par dictionary
+        if ric not in ("cha", "vdw"):
+            params = generate_params(ric, ilist, pot, potname, pvn_count)
+            pvn_count += 1                           
+            par[potname] = (pot, params)
+            print (f" -- Adding {ric} term {ua} with potential {potname} and parameters {params}")            
+        elif ric == "cha":
+            # get sigma from elems tables
+            sig = elems.sigmas[ats[0][0]] if ats[0][0] in elems.sigmas else 0.01
+            if sig == 0.01:
+                print (f" -- WARNING: No sigma found for {ats[0][0]} in elems table, using 0.01")
+            par[potname] = (pot, [0.0, sig])
+            print (f" -- Adding cha term {ua} with potential {potname} and parameters {[0.0, sig]}")
+        elif ric == "vdw":
+            # get vdw params from elems tables
+            epluscoord = "%s%d" % tuple(ats[0])
+            if epluscoord in elems.vdw_prm:
+                vdwpar = elems.vdw_prm[epluscoord]
+            else:
+                if ats[0][0] in elems.vdw_prm:
+                    vdwpar = elems.vdw_prm[ats[0][0]]
+                else:
+                    print (f" -- WARNING: No vdw parameters found for {ats[0][0]} in elems table, using default values (zero vdW)!  ")
+                    vdwpar = [1.0, 0.0]
+            par[potname] = (pot, vdwpar)
+            print (f" -- Adding vdw term {ua} with potential {potname} and parameters {vdwpar}")
+    print (" -- WARNING: This is just an initial guess using MOF-FF rules! Please check the parameters and adjust them if necessary!")
+    return
+
+# helper functions to fixup unassigned terms (this will be fittable automatically)
+def fixup_unassigned_MOFFF(m, unassigned, idx_ua):
+    refsys = m.ff.refsysname
+    for ric in unassigned:
+        if (len(unassigned[ric]) > 0):
+            rtyp = m.ff.ric_type[ric] # list of lists of atom indices for each ric
+            par = m.ff.par[ric] # dict of params (key is the potname, value is a tuple of (pot, parval))
+            parind = m.ff.parind[ric] # list of lists of potnames for each ric
+            print (f" -- Fixing up unassigned {ric} terms")
+            pvn_count = 0
+            for i, ua in enumerate(unassigned[ric]):
+                ilist = idx_ua[ric][i]
+                ats = [split_aftype(a) for a in ua]
+                met = [(e[0] in elems.metals) for e in ats]
+                # now we need to find a potential that matches the atypes .. this is hacky becasue we need to do this per ric
+                if ric == "bnd":
+                    pot = "mm3"
+                    if met[0] or met[1]:
+                        pot = "morse"
+                elif ric == "ang":
+                    pot = "mm3"
+                    if met[1] and ats[1][1] > 4:
+                        pot = "fourier"
+                elif ric == "dih":
+                    pot = "cos3"
+                elif ric == "oop":
+                    pot = "harm"
+                elif ric == "cha":
+                    pot = "gaussian"
+                elif ric == "vdw":
+                    pot = "buck6d"    
+                else:
+                    print (f" -- WARNING: Unknown RIC type {ric} in fixup_unassigned_MOFFF")
+                    continue               
+                # generate the potential name
+                potname = f"{pot}->{ua!s}|{refsys}" # with "!s" we force the string representation of the aftuple
+                # put it into the parind at all locations of the unassigned term
+                for j in ilist:
+                    parind[j] = [potname] # no crossterms at this point
+                assert potname not in par, f" -- ERROR: Potential {potname} already in par dictionary for {ric}!"
+                # now we need to add the potential and parameters to the par dictionary
+                if ric not in ("cha", "vdw"):
+                    params = generate_params(ric, ilist, pot, potname, pvn_count)
+                    pvn_count += 1                           
+                    par[potname] = (pot, params)
+                    print (f" -- Adding {ric} term {ua} with potential {potname} and parameters {params}")
+                elif ric == "cha":
+                    # get sigma from elems tables
+                    sig = elems.sigmas[ats[0][0]] if ats[0][0] in elems.sigmas else 0.01
+                    if sig == 0.01:
+                        print (f" -- WARNING: No sigma found for {ats[0][0]} in elems table, using 0.01")
+                    par[potname] = (pot, [0.0, sig])
+                    print (f" -- Adding cha term {ua} with potential {potname} and parameters {[0.0, sig]}")
+                elif ric == "vdw":
+                    # get vdw params from elems tables
+                    epluscoord = "%s%d" % tuple(ats[0])
+                    if epluscoord in elems.vdw_prm:
+                        vdwpar = elems.vdw_prm[epluscoord]
+                    else:
+                        if ats[0][0] in elems.vdw_prm:
+                            vdwpar = elems.vdw_prm[ats[0][0]]
+                        else:
+                            print (f" -- WARNING: No vdw parameters found for {ats[0][0]} in elems table, using default values (zero vdW)!  ")
+                            vdwpar = [1.0, 0.0]
+                    par[potname] = (pot, vdwpar)
+                    print (f" -- Adding vdw term {ua} with potential {potname} and parameters {vdwpar}")
+    print (" -- WARNING: This is just an initial guess using MOF-FF rules! Please check the parameters and adjust them if necessary!")
+    return
+
+fit_setup = False
+def setup_fix(m, root_name):
+    global fit_setup
+    if fit_setup:
+        return
     print (" -- Need to set a refernce system name here")
     m.ff.refsysname = ptchooser("Reference system", [root_name], default=root_name)[0]
-    # now we cycle through options until all is assigned or fixed up
-    while is_unassigned:
-        print ("\nOptions:")
-        print (" Fixup RICs with unassigned terms")
-        print (" Drop RICs with unassigned terms")
-        print (" Charges for topoQEq")
-        choice = ptchooser("Select option", ["Fixup_RICs", "Drop_RICs", "Charges"], default="Fixup_RICs")[0]
-        print (choice)
-        if choice == "Drop_RICs":
-            ua_rics = [ric for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"] if unassigned[ric] != []]
-            rictype = ptchooser("Select RIC type", ua_rics)[0]
-            check = [(idx_ua[rictype][i], str(unassigned[rictype][i])) for i in range(len(unassigned[rictype]))]
-            chosen = pt.shortcuts.checkboxlist_dialog(title=f"Unassigned {rictype} terms", text="Select terms to be droped", values=check).run()
-            # now delete all the chosen rics in the ff addon (ric itself and parind)
-            # flatten list of lists and sort in reverse order .. then del each element
-            chosen = sorted(list(itertools.chain.from_iterable(chosen)), reverse=True)
-            for i in chosen:
-                del m.ff.parind[rictype][i]
-                del m.ff.ric_type[rictype][i]
-        else:
-            print ("TOBEDONE!!!!  ")
-        
+    # set up the fit stuff (attach varables and compute rics)
+    m.ff.ric.compute_rics()
+    m.ff.par.attach_variables()
+    fit_setup = True
+    return
+
+# main part for assigning unassigned or editing pots
+# we loop until Quit is chosen. the Quit option appears only if all are assigned (this could be just initial params with a fit section)
+done = False
+while not done:
+    if not is_unassigned:
+        print ("\nAll terms in the system are assigned")
+    else:
+        print ("\nSome terms could not be assigned (see table above)")
+        print (" -- adding missing terms as to be fit")
+    print ("\nOptions:")
+    print (" Fixup RICs with unassigned terms")
+    print (" Drop RICs with unassigned terms")
+    print (" Change potentials or make fitable")
+    options = ["Fixup_RICs", "Drop_RICs", "Change"]
+    default = "Fixup_RICs"
+    if not is_unassigned:
+        print (" Write par/ric and quit")
+        options.append("Quit")
+        default = "Quit"
+    choice = ptchooser("Select option", options, default=default)[0]
+    if choice == "Quit":
+        done = True
+        continue
+    elif choice == "Drop_RICs":
+        ua_rics = [ric for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"] if unassigned[ric] != []]
+        rictype = ptchooser("Select RIC type", ua_rics)[0]
+        check = [(idx_ua[rictype][i], str(unassigned[rictype][i])) for i in range(len(unassigned[rictype]))]
+        chosen = pt.shortcuts.checkboxlist_dialog(title=f"Unassigned {rictype} terms", text="Select terms to be droped", values=check).run()
+        # now delete all the chosen rics in the ff addon (ric itself and parind)
+        # flatten list of lists and sort in reverse order .. then del each element
+        chosen = sorted(list(itertools.chain.from_iterable(chosen)), reverse=True)
+        for i in chosen:
+            del m.ff.parind[rictype][i]
+            del m.ff.ric_type[rictype][i]
         is_unassigned, unassigned, idx_ua = check_unassigned()
+    elif choice == "Fixup_RICs":
+        setup_fix(m, root_name)
+        choices = [ric for ric in ["bnd", "ang", "dih", "oop", "cha", "vdw"] if unassigned[ric] != []]
+        choices = ["MOF-FF"] + choices
+        rictype = ptchooser("Select RIC type to fixup", choices, default="MOF-FF")[0]
+        if rictype == "MOF-FF":
+            fixup_unassigned_MOFFF(m, unassigned, idx_ua)
+        else:
+            # find out which pots are available for this ric in lammps_pots
+            lpts = lpots.rics[rictype]
+            potnames = [p for p in lpts if lpts[p].fit_type != None]
+            if len(potnames) == 0:
+                print (f" -- No fitting pots available for {rictype} in lammps_pots")
+                continue
+            print (f" -- Available fitting pots for {rictype}:")
+            print (", ".join(potnames))
+            pot = ptchooser("Select pot to use for fixup", potnames, default=None)[0]
+            fixup_unassigned_pot(m, unassigned[rictype], idx_ua[rictype], rictype, pot)        
+        is_unassigned, unassigned, idx_ua = check_unassigned()
+    elif choice == "Change":
+        setup_fix(m, root_name)
+        choices = [ric for ric in ["bnd", "ang", "dih", "oop"]] # TODO think about how to change vdw and charge params ... need to be consistent
+        rictype = ptchooser("Select RIC type to change", choices, default="bnd")[0]
+        lpts = lpots.rics[rictype]
+        # select terms and find out if they have active cross terms .. to facilitate this we store all in a dict with lambda: None values to attach atributes
+        term_list = {}
+        for t in m.ff.par[rictype].keys():
+            prim_pot, remain = t.split("->")
+            aftypes, refsys = remain.split("|")
+            if not lpts[prim_pot].is_cross:
+                # this is not a cross term .. add it to the dict with the defaults
+                entry = lambda: None
+                entry.fullname = t
+                entry.refsys = refsys
+                entry.prim_pot = prim_pot
+                entry.has_cross = False
+                entry.cross = []
+                entry.idx = [] 
+                term_list[aftypes] = entry
+                # find were it occurs and if it has a cross term (all occurences should have the cross term)
+                for i, pi in enumerate(m.ff.parind[rictype]):
+                    if t in pi:
+                        entry.idx.append(i) # store the index of the ric
+                        if len(pi) > 1:
+                            # this is a cross term
+                            assert pi[0] == t, f" -- ERROR: Non-cross term {t} should be the first in parind {pi} for {rictype}"
+                            entry.has_cross = True
+                            for p in pi[1:]:
+                                cross = p.split("->")[0]
+                                assert cross in lpts[prim_pot].is_cross_parent, f" -- ERROR: Cross term {cross} not in cross terms of {prim_pot} for {rictype}"
+                                if cross not in entry.cross:
+                                    # add the cross term to the entry
+                                    entry.cross.append(cross)
+        if len(term_list) > 0:
+            choices = [(t, f"{term_list[t].refsys:20s} {t:60s} --> {term_list[t].prim_pot} / {term_list[t].cross}") for t in term_list]
+            change_term = radiolist_dialog(title="Change potential", text="Select term to change potential", values=choices).run()
+            if change_term != None:
+                print (f" -- Selected term {change_term} to change potential")
+                # allowed are all entries in pot_list which are not cross terms .. but cross terms can be added
+                choices = []
+                for p in lpts:
+                    if lpts[p].is_cross == False:
+                        choices.append(p)
+                        if lpts[p].is_cross_parent != False:
+                            for cp in subslices(lpts[p].is_cross_parent):
+                                choices.append(f"{p} / {','.join(cp)}")
+                new_pot = ptchooser("Select new potential", choices, default=choices[0])
+                print (f" -- Changing term {change_term} to {new_pot[0]} and setting up fit section")
+                if "/" in new_pot:
+                    # this is a cross term .. we need to split it into the potential and the cross terms
+                    cross_terms = new_pot[2:]
+                    new_pot = new_pot[0] 
+                    print (f" -- Cross terms to be added: {cross_terms}")
+                else:
+                    new_pot = new_pot[0]
+                    cross_terms = []
+                new_term = f"{new_pot}->{change_term}|{m.ff.refsysname}"
+                # now we need to change the potential in the par dictionary and set the fit section
+                # TODO check if the prim_pot remains the same  ... in this case we need to ask if we want to keep params or not 
+                # TODO maybe variables should match the parents ??? how to do this??
+                if new_pot == term_list[change_term].prim_pot:
+                    print (f" -- NOTE: New potential {new_pot} is the same as the old one {term_list[change_term].prim_pot}")
+                    response = ptchooser(" -- Do you want to keep parameters for the new potential?", ["Yes", "No"], default="Yes")[0]
+                    if response == "No":
+                        params = generate_params(rictype, new_pot, new_term, pvn_count=None)
+                    else:
+                        params = m.ff.par[rictype][term_list[change_term].fullname][1] # keep the old params
+                else:
+                    params = generate_params(rictype, new_pot, new_term, pvn_count=None)
+                # del m.ff.par[rictype][term_list[change_term].fullname] # delete the old term
+                del_params(m, rictype, term_list[change_term].prim_pot, term_list[change_term].fullname) # delete the old term
+                m.ff.par[rictype][new_term] = (new_pot, params) # add the new term
+                if term_list[change_term].has_cross:
+                    # we need to delete also the cross terms for this term we have
+                    for ct in term_list[change_term].cross:
+                        # del m.ff.par[rictype][f"{ct}->{change_term}|{term_list[change_term].refsys}"]
+                        del_params(m, rictype, ct, f"{ct}->{change_term}|{term_list[change_term].refsys}")
+                if len(cross_terms) > 0:
+                    # new cross terms are requested
+                    new_cross_terms = [f"{ct}->{change_term}|{m.ff.refsysname}" for ct in cross_terms]
+                    for ct in new_cross_terms:
+                        params = generate_params(rictype, ct.split("->")[0], ct, pvn_count=None)
+                        m.ff.par[rictype][ct] = (ct.split("->")[0], params) # add the cross term
+                # now we need to set the parind for all rics with this term
+                for i in term_list[change_term].idx:
+                    if len(cross_terms) > 0:
+                        m.ff.parind[rictype][i] = [new_term] + new_cross_terms
+                    else:
+                        m.ff.parind[rictype][i] = [new_term]
+        is_unassigned, unassigned, idx_ua = check_unassigned()
+    else:
+        raise ValueError(f"Unknown choice {choice} in assign_FF script")
 
+if args.topoqeq:
+    # TODO currently a fixed topoqeq fit split2to1 is used: in the future we need to make sure that
+    #      all refsys are fitted with the same topoqeq fit and choose a proper one
+    tqf_name = "split2to1" # this is the default name for the topoqeq fit
+    tqf = mfpapi.get_topoqeq_fits()
+    tqf_id = tqf[tqf_name]["id"]
+    at = list(set(m.atypes))
+    topoqeq_par = mfpapi.get_topoqeq_par(tqf_id, at)
+    # now we need to set the topoqeq parameters in the ff addon
+    m.ff.topoqeq_par = {"fit": tqf_name, "par": topoqeq_par}
 
+# print ("DEBUG DEBUG")
+# print ("Active variables in the FF par:")
+# m.ff.par.variables.report()
 
 self_ff = " ".join(sel_ff)
 print (f"-- Setting {self_ff} as FF for the system")

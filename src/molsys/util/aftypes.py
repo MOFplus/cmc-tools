@@ -307,6 +307,14 @@ class aftuple():
     
     def __hash__(self):
         return hash(str(self))
+    
+    def __iter__(self):
+        """return an iterator over the aftypes in the tuple"""
+        return iter(self.t)
+    
+    def __len__(self):
+        """return the number of aftypes in the tuple"""
+        return len(self.t)
 
 class afdict(dict):
 
